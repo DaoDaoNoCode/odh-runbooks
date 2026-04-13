@@ -11,36 +11,57 @@ parameters:
     description: OpenShift project namespace to use
     required: true
     discover_cmd: "oc get namespace -l opendatahub.io/dashboard=true --no-headers -o jsonpath='{.items[*].metadata.name}'"
-    hint: "Must be an ODH Data Science Project (has opendatahub.io/dashboard=true label)"
+    hint: "Must be an ODH Data Science Project"
     example: "my-data-science-project"
+
+  - name: deployed_model_url
+    description: URL of an already-deployed model (skip deploying a new one)
+    required: false
+    default: ""
+    discover_cmd: "oc get inferenceservice -n {project_namespace} --no-headers -o jsonpath='{range .items[*]}{.metadata.name}{":"}{.status.url}{" "}{end}' 2>/dev/null"
+    hint: >
+      If you already have a model deployed, provide its URL here and this runbook
+      skips the model deployment step entirely.
+      To see deployed models: oc get inferenceservice -n <your-namespace>
+      Leave empty if you want this runbook to deploy a model for you (needs model_uri).
+
+  - name: model_uri
+    description: "Path within your S3 bucket to the model artifacts (only needed if deployed_model_url is empty)"
+    required: false
+    default: ""
+    hint: >
+      PATH within the S3 bucket — NOT a full s3:// URL.
+      Example: 'models/my-model' (where the bucket comes from the S3 connection).
+      If you don't have model weights in S3, leave empty and provide deployed_model_url instead.
+      If you have neither, run this with deployed_model_url pointing to any OpenAI-compatible endpoint.
+    example: "models/llama3-8b"
+
   - name: model_name
-    description: Name for the InferenceService
+    description: Name for the InferenceService (only used when deploying a model)
     required: false
     default: evalhub-test-model
     example: "my-llm-model"
-    hint: "Lowercase letters, numbers, and hyphens only. Max 63 characters."
-  - name: model_uri
-    description: Path within your S3 bucket to the model artifacts
-    required: true
-    example: "models/llama3-8b"
-    hint: "This is the PATH within the bucket, not a full s3:// URI. The S3 connection provides the bucket and credentials."
+    hint: "Only relevant when model_uri is provided. Ignored when deployed_model_url is set."
+
   - name: mlflow_experiment_name
     description: Name of the MLflow experiment to create for this evaluation
     required: false
     default: evalhub-evaluation
     example: "llama3-safety-eval"
+
   - name: evalhub_instance_name
     description: Name of the EvalHub CR instance
     required: false
     default: evalhub-instance
     discover_cmd: "oc get evalhub -n {project_namespace} --no-headers -o jsonpath='{.items[*].metadata.name}' 2>/dev/null"
-    hint: "Leave as default unless you have a specific EvalHub instance to target"
+    hint: "Leave as default unless you have a specific EvalHub instance"
+
   - name: benchmark_provider
     description: Which benchmark provider to use for the evaluation run
     required: false
     default: lm-evaluation-harness
     enum: ["lm-evaluation-harness", "garak"]
-    hint: "lm-evaluation-harness: standard accuracy benchmarks (arc, hellaswag, etc). garak: safety/red-teaming."
+    hint: "lm-evaluation-harness: standard benchmarks (arc, hellaswag). garak: safety/red-teaming."
 
 steps:
 
@@ -49,16 +70,15 @@ steps:
   - id: verify-dependencies
     confidence: doc-derived
     description: >
-      Auto-resolve all dependencies: DSC, namespace, TrustyAI, KServe, S3 connection.
-      Each missing dependency is provisioned automatically before proceeding.
+      Auto-resolve core dependencies: DSC, namespace, TrustyAI, KServe.
+      S3 connection is only required if deployed_model_url is empty AND model_uri is set.
+      If deployed_model_url is provided, S3 is not needed.
     requires:
       - type: dsc-exists
       - type: namespace
         name: "{{ project_namespace }}"
       - type: trustyai-enabled
       - type: kserve-enabled
-      - type: s3-connection
-        namespace: "{{ project_namespace }}"
     action:
       type: none
     post_check:
@@ -161,18 +181,68 @@ steps:
       on_fail: STOP
     rollback: "oc delete role eval-hub-user-access rolebinding eval-hub-user-access sa eval-hub-job -n {{ project_namespace }}"
 
-  # ── PHASE 4: Deploy model ─────────────────────────────────────────────────
+  # ── PHASE 4: Deploy model OR use existing ────────────────────────────────
+  # If deployed_model_url is set: skip deployment, use it directly.
+  # If model_uri is set: deploy a model from S3 (auto-provisions S3/MinIO if needed).
+  # If neither: this step fails with a clear message.
+
+  - id: resolve-model-url
+    confidence: doc-derived
+    description: >
+      Resolve the model URL — either use deployed_model_url (skip deployment)
+      or deploy from model_uri, or discover an existing InferenceService.
+      This step short-circuits the entire model deployment block if
+      deployed_model_url is provided or if a model already exists.
+    action:
+      type: query
+      command: |
+        # Priority 1: user provided a deployed model URL directly
+        if [ -n "{{ deployed_model_url }}" ]; then
+          echo "{{ deployed_model_url }}"
+          exit 0
+        fi
+        # Priority 2: model already exists with this name
+        EXISTING=$(oc get inferenceservice {{ model_name }} -n {{ project_namespace }}           -o jsonpath="{.status.url}" 2>/dev/null)
+        if [ -n "$EXISTING" ]; then
+          echo "$EXISTING"
+          exit 0
+        fi
+        # Priority 3: no model_uri provided and no existing model
+        if [ -z "{{ model_uri }}" ]; then
+          echo "ERROR: No model available. Provide either:
+            deployed_model_url: URL of an already-deployed model
+            model_uri: path within S3 bucket (e.g. models/my-model)
+          To see existing models: oc get inferenceservice -n {{ project_namespace }}"
+          exit 1
+        fi
+        # Will deploy from model_uri in the next step
+        echo "DEPLOY_FROM_S3"
+      store_as: model_url_or_signal
+    post_check:
+      assert: model_url_or_signal is not empty
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+    on_fail_hint: >
+      You need either:
+        1. deployed_model_url: URL of an existing deployed model
+           Discover with: oc get inferenceservice -n <namespace> -o jsonpath='{.items[*].status.url}'
+        2. model_uri: S3 path to model weights (S3 will be auto-provisioned if needed)
+           Example: models/llama3-8b
 
   - id: deploy-model
     confidence: inferred
-    description: Deploy model via KServe InferenceService (RawDeployment mode)
+    description: >
+      Deploy model from S3 — ONLY runs if deployed_model_url was empty and
+      model_url_or_signal == 'DEPLOY_FROM_S3'. Skipped if model already resolved.
     pre_check:
-      command: "oc get inferenceservice {{ model_name }} -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
-      expected: "1"
+      command: "[ '{{ model_url_or_signal }}' = 'DEPLOY_FROM_S3' ] && echo needed || echo skip"
+      expected: "needed"
       if_already_true: skip
       on_fail: STOP
     action:
-      type: create
+      type: apply
       dry_run: true
       manifest: |
         apiVersion: serving.kserve.io/v1beta1
@@ -180,15 +250,22 @@ steps:
         metadata:
           name: {{ model_name }}
           namespace: {{ project_namespace }}
+          labels:
+            opendatahub.io/dashboard: "true"
           annotations:
             openshift.io/display-name: "{{ model_name }}"
+            openshift.io/description: ""
+            opendatahub.io/model-type: "Generative"
+            opendatahub.io/connections: "{{ s3_connection_name | default('') }}"
+            opendatahub.io/connection-path: "{{ model_uri }}"
+            security.opendatahub.io/enable-auth: "false"
             serving.kserve.io/deploymentMode: RawDeployment
         spec:
           predictor:
+            minReplicas: 1
             model:
               modelFormat:
                 name: vllm
-              storageUri: {{ model_uri }}
               resources:
                 requests:
                   cpu: "1"
@@ -196,6 +273,8 @@ steps:
                 limits:
                   cpu: "4"
                   memory: "8Gi"
+              storage:
+                path: "{{ model_uri }}"
     post_check:
       command: "oc get inferenceservice {{ model_name }} -n {{ project_namespace }} -o jsonpath='{.status.modelStatus.states.activeModelState}' 2>/dev/null"
       expected: "Loaded"
@@ -205,16 +284,25 @@ steps:
     rollback: "oc delete inferenceservice {{ model_name }} -n {{ project_namespace }}"
 
   - id: get-model-url
-    confidence: inferred
-    description: Retrieve the model inference endpoint URL
+    confidence: doc-derived
+    description: >
+      Resolve final model URL. Uses deployed_model_url directly if provided,
+      otherwise reads from InferenceService status.url (set by odh-model-controller Route).
     action:
       type: query
-      command: "oc get inferenceservice {{ model_name }} -n {{ project_namespace }} -o jsonpath='{.status.url}'"
+      command: |
+        if [ -n "{{ deployed_model_url }}" ]; then
+          echo "{{ deployed_model_url }}"
+        elif [ "{{ model_url_or_signal }}" != "DEPLOY_FROM_S3" ]; then
+          echo "{{ model_url_or_signal }}"
+        else
+          oc get inferenceservice {{ model_name }} -n {{ project_namespace }} -o jsonpath="{.status.url}"
+        fi
       store_as: model_url
     post_check:
       assert: model_url is not empty
-      command: "oc get inferenceservice {{ model_name }} -n {{ project_namespace }} -o jsonpath='{.status.url}'"
-      expected_min: 1
+      command: "echo ok"
+      expected: "ok"
       timeout: "30s"
       on_fail: STOP
 

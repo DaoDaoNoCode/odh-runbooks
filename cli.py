@@ -127,7 +127,7 @@ def run(runbook_name: str, param: tuple[str, ...], mode: str, dry_run_only: bool
             sys.exit(1)
 
     cluster = ClusterClient()
-    executor = RunbookExecutor(runbook, params, cluster, mode=run_mode)
+    executor = RunbookExecutor(runbook, params, cluster, mode=run_mode, runbook_path=runbook_name)
     success = asyncio.run(executor.run())
     sys.exit(0 if success else 1)
 
@@ -353,7 +353,7 @@ def wizard(runbook_name: str, param: tuple[str, ...]):
     console.print()
     if click.confirm("Preview plan before executing?", default=True):
         from runner.executor import RunMode
-        executor = RunbookExecutor(runbook, params, ClusterClient(), mode=RunMode.PLAN)
+        executor = RunbookExecutor(runbook, params, ClusterClient(), mode=RunMode.PLAN, runbook_path=runbook_name)
         success = asyncio.run(executor.run())
         if not success:
             sys.exit(1)
@@ -361,7 +361,7 @@ def wizard(runbook_name: str, param: tuple[str, ...]):
 
     if click.confirm("Execute now?", default=False):
         from runner.executor import RunMode
-        executor = RunbookExecutor(runbook, params, ClusterClient(), mode=RunMode.IMPLEMENT)
+        executor = RunbookExecutor(runbook, params, ClusterClient(), mode=RunMode.IMPLEMENT, runbook_path=runbook_name)
         success = asyncio.run(executor.run())
         sys.exit(0 if success else 1)
     else:

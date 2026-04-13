@@ -56,11 +56,13 @@ class RunbookExecutor:
         params: dict,
         cluster: ClusterClient,
         mode: RunMode = RunMode.IMPLEMENT,
+        runbook_path: str = "",  # e.g. "evalhub/create-evaluation-run" for display
     ):
         self.runbook = runbook
         self.params = params
         self.cluster = cluster
         self.mode = mode
+        self.runbook_path = runbook_path  # file path for display (e.g. evalhub/create-evaluation-run)
         self.context: dict = {}
         self.rollback_log: list[dict] = []
         self.plan_log: list[dict] = []          # collected in PLAN mode
@@ -150,7 +152,7 @@ class RunbookExecutor:
 
                 console.print("\n[dim]Next steps:[/dim]")
                 console.print(f"  [dim]• Check cluster state:  odh doctor[/dim]")
-                runbook_id = self.runbook.name.replace('-', '/', 1)
+                runbook_id = self.runbook_path or self.runbook.name
                 param_str = " ".join(f"-p {k}={v}" for k, v in self.params.items())
                 console.print(f"  [dim]• Re-check what exists: odh run {runbook_id} --mode qa {param_str}[/dim]")
                 console.print(f"  [dim]• Ask for help:         odh ask \"why did {step.id} fail?\"[/dim]")
@@ -256,10 +258,12 @@ class RunbookExecutor:
 
         for i, step in enumerate(self.runbook.steps, 1):
             color = self._confidence_color(step.confidence)
+            # Use .value to get "doc-derived" not "Confidence.DOC_DERIVED"
+            conf_display = step.confidence.value if hasattr(step.confidence, 'value') else str(step.confidence)
             plan_table.add_row(
                 str(i),
                 step.id,
-                f"[{color}]{step.confidence}[/]",
+                f"[{color}]{conf_display}[/]",
                 step.action.type,
                 step.description[:60]
             )
@@ -271,7 +275,9 @@ class RunbookExecutor:
 
         console.print(f"\n[bold]To execute:[/bold]")
         param_str = " ".join(f"-p {k}={v}" for k, v in self.params.items())
-        console.print(f"  odh run {self.runbook.name.replace('-', '/', 1)} {param_str}")
+        # Use the actual file path (self.runbook_path) if available, not the YAML name field
+        display_name = self.runbook_path or self.runbook.name
+        console.print(f"  odh run {display_name} {param_str}")
 
         return True
 

@@ -143,14 +143,15 @@ steps:
       1. OdhDashboardConfig.disableLMEval must be false (feature flag gate).
          Auto-fixes if blocked.
 
-      2. MODULE_FEDERATION_CONFIG env var on the dashboard Deployment must include
-         the evalHub entry. This is set by the opendatahub-operator when TrustyAI
-         is enabled in DSC. Without it the /_mf/evalHub proxy is never registered
-         and the /evaluation route returns 404.
-         Read-only check — managed by the operator, cannot be manually set.
+      2. federation-config ConfigMap must exist in the ODH namespace and contain
+         an evalHub entry. This ConfigMap is created at dashboard install time as
+         part of the modular-architecture kustomize overlay — NOT by the TrustyAI
+         operator. The ConfigMap tells the dashboard backend to proxy /_mf/evalHub
+         to the eval-hub-ui sidecar container on port 8543.
 
-      3. EvalHub module federation service must be running in the namespace.
-         Deployed by TrustyAI operator when EvalHub CR reaches Ready.
+      3. The eval-hub-ui sidecar container must be running inside the dashboard pod.
+         It is added to the dashboard Deployment by the modular-architecture overlay.
+         Check: oc get deployment rhods-dashboard -n <odh-ns> -o jsonpath containers names.
     action:
       type: query
       command: |
@@ -171,39 +172,39 @@ steps:
           fi
         fi
 
-        # --- Layer 4a: MODULE_FEDERATION_CONFIG env var ---
-        # The opendatahub-operator sets this on the dashboard Deployment.
-        # It tells the dashboard backend which services to proxy for each federated module.
+        # --- Layer 4a: federation-config ConfigMap (dashboard install artefact) ---
         echo ""
-        echo "=== Dashboard MODULE_FEDERATION_CONFIG ==="
-        DASH_DEPLOY=$(oc get deployment -n $ODH_NS -l app=rhods-dashboard -o name 2>/dev/null | head -1)
-        if [ -n "$DASH_DEPLOY" ]; then
-          MF_CONFIG=$(oc get $DASH_DEPLOY -n $ODH_NS \
-            -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="MODULE_FEDERATION_CONFIG")].value}' \
-            2>/dev/null)
-          if echo "$MF_CONFIG" | python3 -m json.tool 2>/dev/null | grep -qi "evalhub\|eval-hub\|lmeval"; then
-            echo "OK: evalHub is registered in MODULE_FEDERATION_CONFIG"
-          elif [ -n "$MF_CONFIG" ]; then
-            echo "WARNING: evalHub NOT in MODULE_FEDERATION_CONFIG — registered modules:"
-            echo "$MF_CONFIG" | python3 -c "import json,sys; d=json.load(sys.stdin); [print('  -',m.get('name','?')) for m in d]" 2>/dev/null || echo "$MF_CONFIG" | head -3
-            echo "The opendatahub-operator will set this when DSC reconciles."
-            echo "Trigger: oc patch $(oc get dsc -o name | head -1) --type merge -p '{"spec":{}}'"
-          else
-            echo "WARNING: MODULE_FEDERATION_CONFIG env var is empty or not set"
-            echo "The opendatahub-operator sets this — check DSC reconciliation status"
+        echo "=== federation-config ConfigMap (modular-architecture overlay) ==="
+        if oc get configmap federation-config -n $ODH_NS 2>/dev/null | grep -q federation-config; then
+          echo "OK: federation-config ConfigMap exists"
+          EVAL_ENTRY=$(oc get configmap federation-config -n $ODH_NS \
+            -o jsonpath='{.data.module-federation-config\.json}' 2>/dev/null | \
+            python3 -c "import json,sys; d=json.load(sys.stdin); print('found' if any(m.get('name')=='evalHub' for m in d) else 'missing')" 2>/dev/null)
+          echo "evalHub entry in federation-config: $EVAL_ENTRY"
+          if [ "$EVAL_ENTRY" != "found" ]; then
+            echo "WARNING: evalHub not in federation-config — the modular-architecture"
+            echo "  overlay was not applied when the dashboard was installed."
+            echo "  This is a dashboard installation issue, not a TrustyAI issue."
           fi
         else
-          echo "WARNING: dashboard deployment not found in $ODH_NS"
+          echo "WARNING: federation-config ConfigMap not found in $ODH_NS"
+          echo "  The modular-architecture kustomize overlay was not applied."
+          echo "  EvalHub UI cannot load without this ConfigMap."
         fi
 
-        # --- Layer 4b: EvalHub module federation service ---
+        # --- Layer 4b: eval-hub-ui sidecar in the dashboard pod ---
         echo ""
-        echo "=== EvalHub service/pods (module federation server) ==="
-        oc get pods -n {{ project_namespace }} --no-headers 2>/dev/null | \
-          grep -iE "evalhub|eval-hub|lmeval" || \
-          echo "(none yet — TrustyAI operator deploys this when EvalHub CR reaches Ready)"
-        oc get service -n {{ project_namespace }} --no-headers 2>/dev/null | \
-          grep -iE "evalhub|eval-hub|lmeval" || true
+        echo "=== eval-hub-ui sidecar in dashboard Deployment ==="
+        CONTAINERS=$(oc get deployment -n $ODH_NS -l app=rhods-dashboard \
+          -o jsonpath='{.items[0].spec.template.spec.containers[*].name}' 2>/dev/null)
+        if echo "$CONTAINERS" | grep -q "eval-hub"; then
+          echo "OK: eval-hub-ui sidecar container is present in dashboard pod"
+        else
+          echo "WARNING: eval-hub-ui sidecar NOT in dashboard pod"
+          echo "  Dashboard containers: $CONTAINERS"
+          echo "  The modular-architecture overlay adds this sidecar."
+          echo "  EvalHub UI cannot load without this container."
+        fi
 
         echo "done"
       store_as: evalhub_visibility_status
@@ -218,361 +219,10 @@ steps:
       timeout: "30s"
       on_fail: STOP
     on_fail_hint: >
-      If disableLMEval=true: patch OdhDashboardConfig to false (auto-fixed above).
-      If /evaluation is blank (no error): MODULE_FEDERATION_CONFIG is missing evalHub.
-        The opendatahub-operator sets this — re-touch DSC to trigger reconciliation:
-        oc annotate $(oc get dsc -o name | head -1) reconcile=$(date +%s) --overwrite
-        Then wait for the dashboard pod to restart with the updated env var.
-      If evalHub is in MODULE_FEDERATION_CONFIG but page still blank:
-        EvalHub module federation service not running yet — check EvalHub CR phase:
-        oc get evalhub {{ evalhub_instance_name }} -n {{ project_namespace }} -o jsonpath='{.status.phase}'
-        Wait for Ready, then the service should appear.
-
+      If disableLMEval=true: auto-fixed above. If still blocked, manually patch OdhDashboardConfig.
+      If federation-config ConfigMap is missing or has no evalHub entry: the modular-architecture
+      kustomize overlay was not applied at dashboard install time. This is a dashboard installation
+      issue — the eval-hub-ui sidecar container and federation-config ConfigMap must be present.
+      Check with your ODH admin whether the modular-architecture overlay is enabled.
+      If eval-hub-ui sidecar is missing from dashboard pod: same root cause — overlay not applied.
   - id: create-evalhub-rbac
-    confidence: doc-derived
-    description: Create RBAC roles for EvalHub and MLflow access
-    pre_check:
-      command: "oc get role eval-hub-user-access -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
-      expected: "1"
-      if_already_true: skip
-      on_fail: STOP
-    action:
-      type: apply
-      dry_run: true
-      manifest: |
-        apiVersion: v1
-        kind: ServiceAccount
-        metadata:
-          name: eval-hub-job
-          namespace: {{ project_namespace }}
-        ---
-        apiVersion: rbac.authorization.k8s.io/v1
-        kind: Role
-        metadata:
-          name: eval-hub-user-access
-          namespace: {{ project_namespace }}
-        rules:
-          - apiGroups: ["trustyai.opendatahub.io"]
-            resources: ["evaluations", "collections", "providers"]
-            verbs: ["get", "list", "create", "update", "patch", "delete"]
-          - apiGroups: ["trustyai.opendatahub.io"]
-            resources: ["status-events"]
-            verbs: ["create"]
-          - apiGroups: ["mlflow.kubeflow.org"]
-            resources: ["experiments"]
-            verbs: ["create", "update"]
-        ---
-        apiVersion: rbac.authorization.k8s.io/v1
-        kind: RoleBinding
-        metadata:
-          name: eval-hub-user-access
-          namespace: {{ project_namespace }}
-        subjects:
-          - kind: ServiceAccount
-            name: eval-hub-job
-            namespace: {{ project_namespace }}
-        roleRef:
-          apiGroup: rbac.authorization.k8s.io
-          kind: Role
-          name: eval-hub-user-access
-    post_check:
-      command: "oc get role eval-hub-user-access -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
-      expected: "1"
-      timeout: "30s"
-      on_fail: STOP
-
-  # ── PHASE 3a: Create vLLM ServingRuntime from RHOAI template ────────────
-  # RHOAI stores runtimes as OpenShift Templates in redhat-ods-applications.
-  # The dashboard instantiates the template to create a namespace-scoped ServingRuntime.
-  # We must do the same — no ServingRuntime = "no runtime found" error from KServe.
-
-  - id: create-vllm-serving-runtime
-    confidence: doc-derived
-    description: >
-      Instantiate the vLLM CUDA ServingRuntime template from redhat-ods-applications.
-      RHOAI stores runtimes as Templates (not ClusterServingRuntimes).
-      Template 'vllm-cuda-runtime-template' creates 'vllm-cuda-runtime' ServingRuntime.
-      supportedModelFormats: [{name: vLLM}] — case-sensitive, must match InferenceService.
-    pre_check:
-      command: "oc get servingruntime vllm-cuda-runtime -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
-      expected: "1"
-      if_already_true: skip
-      on_fail: STOP
-    action:
-      type: query
-      command: |
-        oc process -n redhat-ods-applications vllm-cuda-runtime-template 2>/dev/null |           oc apply -n {{ project_namespace }} -f - 2>&1
-        echo "done"
-      store_as: runtime_result
-    post_check:
-      command: "oc get servingruntime vllm-cuda-runtime -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
-      expected_min: 1
-      timeout: "30s"
-      on_fail: STOP
-    on_fail_hint: >
-      Template vllm-cuda-runtime-template not found in redhat-ods-applications.
-      Check: oc get template -n redhat-ods-applications | grep vllm
-      The template is created by the RHOAI operator when kserve is enabled.
-    rollback: "oc delete servingruntime vllm-cuda-runtime -n {{ project_namespace }} 2>/dev/null || true"
-
-  # ── PHASE 3: Resolve model ────────────────────────────────────────────────
-
-  - id: resolve-model
-    confidence: doc-derived
-    description: >
-      Decide which model to use — checked in priority order:
-      1. deployed_model_url set → use it directly, skip all deployment
-      2. Model already exists in namespace → use it, skip deployment
-      3. Default → deploy from modelcar catalog via OCI (no S3, no auth)
-    action:
-      type: query
-      command: |
-        if [ -n "{{ deployed_model_url }}" ]; then
-          echo "EXISTING:{{ deployed_model_url }}"
-          exit 0
-        fi
-        EXISTING_URL=$(oc get inferenceservice {{ model_name }} -n {{ project_namespace }} \
-          -o jsonpath="{.status.url}" 2>/dev/null)
-        if [ -n "$EXISTING_URL" ] && [ "$EXISTING_URL" != "null" ]; then
-          echo "EXISTING:$EXISTING_URL"
-          exit 0
-        fi
-        echo "DEPLOY:quay.io/redhat-ai-services/modelcar-catalog:{{ model_catalog_tag }}"
-      store_as: model_resolution
-    post_check:
-      assert: model_resolution is not empty
-      command: "echo ok"
-      expected: "ok"
-      timeout: "10s"
-      on_fail: STOP
-
-  - id: deploy-model-from-catalog
-    confidence: inferred
-    description: >
-      Deploy model from Red Hat's public modelcar catalog via OCI.
-      storageUri: oci://quay.io/redhat-ai-services/modelcar-catalog:<tag>
-      Public — no S3, no credentials, no connection secret needed.
-      Skipped if an existing model URL was resolved in the previous step.
-      Requires 1 GPU (for vLLM runtime).
-    pre_check:
-      command: "echo '{{ model_resolution }}' | grep -q '^DEPLOY:' && echo needed || echo skip"
-      expected: "skip"
-      if_already_true: skip
-      on_fail: STOP
-    action:
-      type: apply
-      dry_run: true
-      manifest: |
-        apiVersion: serving.kserve.io/v1beta1
-        kind: InferenceService
-        metadata:
-          name: {{ model_name }}
-          namespace: {{ project_namespace }}
-          labels:
-            opendatahub.io/dashboard: "true"
-          annotations:
-            openshift.io/display-name: "{{ model_name }}"
-            openshift.io/description: "EvalHub test model ({{ model_catalog_tag }})"
-            opendatahub.io/model-type: "Generative"
-            security.opendatahub.io/enable-auth: "false"
-            serving.kserve.io/deploymentMode: RawDeployment
-        spec:
-          predictor:
-            minReplicas: 1
-            model:
-              modelFormat:
-                name: vLLM
-              runtime: vllm-cuda-runtime
-              storageUri: "oci://{{ model_resolution | replace('DEPLOY:', '') }}"
-              resources:
-                requests:
-                  cpu: "1"
-                  memory: "10Gi"
-                  nvidia.com/gpu: "1"
-                limits:
-                  memory: "10Gi"
-                  nvidia.com/gpu: "1"
-              args:
-                - "--dtype=half"
-                - "--max-model-len=8192"
-                - "--gpu-memory-utilization=0.95"
-    post_check:
-      command: "oc get inferenceservice {{ model_name }} -n {{ project_namespace }} -o jsonpath='{.status.modelStatus.states.activeModelState}' 2>/dev/null"
-      expected: "Loaded"
-      timeout: "900s"
-      poll_interval: "20s"
-      on_fail: STOP
-    on_fail_hint: >
-      Model failed to load. Try:
-        Smaller model: re-run with -p model_catalog_tag=llama-3.2-1b-instruct (2.5 GB)
-        Check GPU:     odh run gpu/verify-gpu-available
-        Check logs:    oc logs -l serving.kserve.io/inferenceservice={{ model_name }} -n {{ project_namespace }}
-    rollback: "oc delete inferenceservice {{ model_name }} -n {{ project_namespace }} 2>/dev/null || true"
-
-  - id: get-model-url
-    confidence: doc-derived
-    description: Get final model URL (from existing or newly deployed model)
-    action:
-      type: query
-      command: |
-        if echo "{{ model_resolution }}" | grep -q '^EXISTING:'; then
-          echo "{{ model_resolution }}" | sed 's/^EXISTING://'
-        else
-          oc get inferenceservice {{ model_name }} -n {{ project_namespace }} \
-            -o jsonpath="{.status.url}" 2>/dev/null || echo ""
-        fi
-      store_as: model_url
-    post_check:
-      assert: model_url is not empty
-      command: "echo ok"
-      expected: "ok"
-      timeout: "30s"
-      on_fail: STOP
-
-  # ── PHASE 4: Create evaluation run ───────────────────────────────────────
-
-  - id: get-evalhub-route
-    confidence: inferred
-    description: Get the EvalHub service route
-    action:
-      type: query
-      command: "oc get route -n {{ project_namespace }} -l app={{ evalhub_instance_name }} -o jsonpath='{.items[0].spec.host}' 2>/dev/null"
-      store_as: evalhub_host
-    post_check:
-      assert: evalhub_host is not empty
-      command: "oc get route -n {{ project_namespace }} -l app={{ evalhub_instance_name }} -o jsonpath='{.items[0].spec.host}'"
-      expected_min: 1
-      timeout: "60s"
-      on_fail: STOP
-
-  - id: get-cluster-token
-    confidence: doc-derived
-    description: Get current user token for API authentication
-    action:
-      type: query
-      command: "oc whoami -t"
-      store_as: oc_token
-    post_check:
-      assert: oc_token is not empty
-      command: "oc whoami -t"
-      expected_min: 1
-      timeout: "10s"
-      on_fail: STOP
-
-  - id: create-evaluation-job
-    confidence: doc-derived
-    description: POST evaluation job to EvalHub REST API with MLflow experiment
-    action:
-      type: api_call
-      method: POST
-      url: "https://{{ evalhub_host }}/api/v1/evaluations/jobs"
-      headers:
-        X-Tenant: "{{ project_namespace }}"
-        Content-Type: "application/json"
-        Authorization: "Bearer {{ oc_token }}"
-      body: |
-        {
-          "name": "{{ mlflow_experiment_name }}",
-          "description": "EvalHub test run via odh-runbooks",
-          "model": {
-            "name": "{{ model_name }}",
-            "url": "{{ model_url }}"
-          },
-          "benchmarks": [{
-            "id": "arc_easy",
-            "provider_id": "{{ benchmark_provider }}",
-            "primary_score": {
-              "metric": "acc_norm",
-              "lower_is_better": false
-            },
-            "pass_criteria": { "threshold": 0.25 }
-          }],
-          "experiment": {
-            "name": "{{ mlflow_experiment_name }}",
-            "tags": [
-              { "key": "created_by", "value": "odh-runbooks" },
-              { "key": "model_catalog_tag", "value": "{{ model_catalog_tag }}" }
-            ]
-          }
-        }
-      store_response_as: eval_job
-    post_check:
-      assert: eval_job is not empty
-      command: "echo ok"
-      expected: "ok"
-      timeout: "30s"
-      on_fail: STOP
-
-  - id: wait-evaluation-complete
-    confidence: doc-derived
-    description: Poll until evaluation completes or fails (max 30 minutes)
-    action:
-      type: poll
-      url: "https://{{ evalhub_host }}/api/v1/evaluations/jobs/{{ eval_job.resource.id }}"
-      headers:
-        X-Tenant: "{{ project_namespace }}"
-        Authorization: "Bearer {{ oc_token }}"
-      until: "response.status.state in ['completed', 'failed', 'cancelled']"
-      timeout: "1800s"
-      poll_interval: "30s"
-    post_check:
-      command: "echo ok"
-      expected: "ok"
-      timeout: "10s"
-      on_fail: STOP
-
-  - id: return-result
-    confidence: inferred
-    description: Get dashboard URL and return summary
-    action:
-      type: query
-      command: |
-        oc get route rhods-dashboard -n redhat-ods-applications \
-          -o jsonpath='{.spec.host}' 2>/dev/null || \
-        oc get route rhods-dashboard -n opendatahub \
-          -o jsonpath='{.spec.host}' 2>/dev/null
-      store_as: dashboard_host
-    post_check:
-      command: "echo ok"
-      expected: "ok"
-      timeout: "10s"
-      on_fail: STOP
-    return: |
-      ✓ EvalHub evaluation run complete.
-
-      Namespace:  {{ project_namespace }}
-      Model:      {{ model_name }} ({{ model_catalog_tag }})
-        Source:   {{ model_resolution | replace('DEPLOY:', 'OCI catalog: ') | replace('EXISTING:', 'existing: ') }}
-        URL:      {{ model_url }}
-      Benchmark:  arc_easy via {{ benchmark_provider }}
-
-      ── View results ────────────────────────────────────────────
-      https://{{ dashboard_host }}/evaluation/{{ project_namespace }}
-
-      Re-run with different options:
-        Smaller model (faster): -p model_catalog_tag=llama-3.2-1b-instruct
-        Safety eval:            -p benchmark_provider=garak
-        Your own model:         -p deployed_model_url=<your-endpoint>
-
-known_bad_patterns:
-  - "never set model_uri (S3 path) — the default OCI catalog path needs no S3"
-  - "never create the EvalHub Route manually — auto-created by odh-model-controller"
-  - "if model fails to load with OOM: use llama-3.2-1b-instruct (2.5GB) instead of default"
-
-rollback_order:
-  - "oc delete evalhub {{ evalhub_instance_name }} -n {{ project_namespace }} 2>/dev/null || true"
-  - "oc delete inferenceservice {{ model_name }} -n {{ project_namespace }} 2>/dev/null || true"
-  - "oc delete role eval-hub-user-access rolebinding eval-hub-user-access sa eval-hub-job -n {{ project_namespace }} 2>/dev/null || true"
-
-source_repos:
-  - "https://github.com/trustyai-explainability/trustyai-service-operator"
-  - "https://github.com/opendatahub-io/trustyai-explainability"
-  - "https://github.com/kserve/kserve"
-  - "https://github.com/opendatahub-io/opendatahub-operator"
-
-tags: ["evalhub", "mlflow", "model-serving", "trustyai"]
-estimated_minutes: 25
-next_steps:
-  - "View results in dashboard: Projects → {{ project_namespace }} → EvalHub"
-  - "Safety evaluation: -p benchmark_provider=garak"
-  - "Larger model: -p model_catalog_tag=granite-3.3-8b-instruct"

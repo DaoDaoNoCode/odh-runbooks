@@ -393,56 +393,59 @@ oc get dsci -o jsonpath='{.items[0].status.conditions}' | python3 -m json.tool
 # This is automatic when DSCI is healthy — rarely needs manual intervention
 ```
 
-### Layer 4 — Module federation (EvalHub only)
+### Layer 4 — Module federation (EvalHub and other packages)
 
-EvalHub uses **webpack module federation** — its UI is loaded at runtime from a separate service
-at `/_mf/evalHub/remoteEntry.js`. There are two sub-checks here:
+EvalHub (and MLflow, GenAI, Model Registry, AutoML, etc.) use **webpack module federation**
+— their UIs run as **sidecar containers inside the same dashboard pod**, proxied via `/_mf/{name}`.
 
-**4a — `MODULE_FEDERATION_CONFIG` env var on the dashboard Deployment**
+**Architecture** (from `manifests/modular-architecture/`):
+- `federation-config` ConfigMap in the ODH namespace — contains JSON array of all module configs
+- Dashboard reads it as `MODULE_FEDERATION_CONFIG` env var
+- Each module is a sidecar container (e.g., `eval-hub-ui` on port 8543) in the dashboard pod
+- The `odh-dashboard` Service exposes port 8543 as `eval-hub-ui`
+- Dashboard backend proxies `/_mf/evalHub/*` → the sidecar on port 8543
 
-This env var is set by the **opendatahub-operator** (not a ConfigMap — no ConfigMap to check).
-It contains a JSON array telling the dashboard backend which services to proxy for each module.
-Without the `evalHub` entry, the `/_mf/evalHub` proxy is never registered → the route 404s.
+**Who creates these?** The `modular-architecture` kustomize overlay applied at **dashboard install time**.
+NOT created by the TrustyAI operator or any component operator — it's part of the dashboard deployment.
+
+**4a — `federation-config` ConfigMap** (dashboard install artefact)
 
 ```bash
 ODH_NS=redhat-ods-applications  # or opendatahub
 
-# Check if evalHub is registered
-oc get deployment -n $ODH_NS -l app=rhods-dashboard -o name | head -1 | \
-  xargs -I{} oc get {} -n $ODH_NS \
-    -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="MODULE_FEDERATION_CONFIG")].value}' \
-  | python3 -m json.tool | grep -i eval
-# Should show an entry with name: evalHub or similar
+# Check it exists and has evalHub
+oc get configmap federation-config -n $ODH_NS 2>/dev/null && echo "exists" || echo "MISSING"
 
-# If evalHub is missing — trigger DSC reconciliation (operator re-sets the env var):
-oc annotate $(oc get dsc -o name | head -1) reconcile=$(date +%s) --overwrite
-# Then wait for dashboard pod to restart with the updated env var
+# Check evalHub is in the config
+oc get configmap federation-config -n $ODH_NS \
+  -o jsonpath='{.data.module-federation-config\.json}' \
+  | python3 -m json.tool | grep -A5 '"evalHub"'
 ```
 
-This env var is **operator-managed** — never set it manually, the operator will overwrite it.
+If missing: the `modular-architecture` overlay was not applied at install. Dashboard installation issue, not TrustyAI.
 
-**4b — EvalHub module federation service in the project namespace**
-
-The TrustyAI operator deploys this service when the EvalHub CR reaches `Ready`. It's the
-actual server that responds to `/_mf/evalHub/remoteEntry.js` requests.
+**4b — `eval-hub-ui` sidecar container in the dashboard pod**
 
 ```bash
-# Check the service is running
-oc get pods -n <project-ns> | grep -iE "evalhub|eval-hub|lmeval"
-oc get service -n <project-ns> | grep -iE "evalhub|eval-hub|lmeval"
+# Check the sidecar is in the deployment spec
+oc get deployment -n $ODH_NS -l app=rhods-dashboard \
+  -o jsonpath='{.items[0].spec.template.spec.containers[*].name}' | tr ' ' '\n' | grep eval
 
-# End-to-end test: dashboard proxy → EvalHub service
+# Check the running pod has the container
+oc get pod -n $ODH_NS -l app=rhods-dashboard \
+  -o jsonpath='{.items[0].status.containerStatuses[*].name}' | tr ' ' '\n' | grep eval
+
+# End-to-end: does /_mf/evalHub respond?
 DASH_POD=$(oc get pod -n $ODH_NS -l app=rhods-dashboard -o name | head -1)
-oc exec $DASH_POD -n $ODH_NS -- curl -s -o /dev/null -w "%{http_code}" \
-  http://localhost:8080/_mf/evalHub/remoteEntry.js
-# 200 = working, 404 = MODULE_FEDERATION_CONFIG missing evalHub,
-# 503 = evalHub service not running
+oc exec $DASH_POD -n $ODH_NS -c rhods-dashboard -- \
+  curl -sk -o /dev/null -w "%{http_code}" https://localhost:8543/healthcheck
+# 200 = sidecar running, connection refused = sidecar not started
 ```
 
 **Symptom map:**
-- `/evaluation` returns **404** → `MODULE_FEDERATION_CONFIG` missing evalHub (check operator reconciliation)
-- `/evaluation` shows **blank page** → evalHub service not running (check EvalHub CR phase)
-- `/evaluation` shows **content** but no runs → EvalHub CR Ready but no eval job created yet
+- `/evaluation` returns **404** → `federation-config` missing evalHub or `eval-hub-ui` sidecar not running
+- `/evaluation` shows **blank page** → sidecar running but EvalHub backend (from CR) not ready
+- `/evaluation` shows **content** but no runs → everything working, just no eval job submitted yet
 
 ---
 

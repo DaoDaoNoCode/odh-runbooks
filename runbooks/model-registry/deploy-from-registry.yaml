@@ -1,16 +1,36 @@
 name: model-registry-deploy-from-registry
 description: >
   Deploy a model from the Model Registry to KServe InferenceService.
-  Looks up the model artifact URI from the registry and deploys it.
-  This is the "correct user flow" — register first, then deploy from registry.
+  This is the correct user flow — register first, then deploy from registry.
+
+  HOW MODEL REGISTRY LINKING WORKS (from odh-model-controller source):
+  The odh-model-controller's ModelRegistryInferenceServiceReconciler watches
+  InferenceServices and links them to the model registry by setting labels:
+    modelregistry.opendatahub.io/model-version-id
+    modelregistry.opendatahub.io/registered-model-id
+    modelregistry.opendatahub.io/inference-service-id
+    modelregistry.opendatahub.io/name
+    modelregistry.opendatahub.io/namespace
+
+  These must be set as LABELS (not annotations) using the correct prefix
+  'modelregistry.opendatahub.io/' (NOT 'model-registry/').
+
+  WHAT THE CONTROLLER AUTO-CREATES (do not create manually):
+  - OpenShift Route — auto-created by odh-model-controller when IS is created
+  - ServiceMonitor/PodMonitor — auto-created for Prometheus metrics
+  - ClusterRoleBinding — auto-created when security.opendatahub.io/enable-auth=true
+
+  Routes are created automatically, so status.url is populated without
+  any manual Route creation.
 rhoai_version_tested: null
-confidence_overall: inferred
+confidence_overall: doc-derived
 
 parameters:
   - name: registry_name
     description: Model registry instance name
     required: false
     default: model-registry
+    discover_cmd: "oc get modelregistry -n odh-model-registries --no-headers -o jsonpath='{.items[*].metadata.name}' 2>/dev/null"
   - name: registry_namespace
     description: Model registry namespace
     required: false
@@ -18,19 +38,35 @@ parameters:
   - name: model_version_id
     description: Model version ID from the registry (from register-model output)
     required: true
+    hint: "Get from: odh run model-registry/register-model output, or model registry dashboard"
+    example: "42"
   - name: project_namespace
     description: Target project namespace to deploy into
     required: true
+    discover_cmd: "oc get namespace -l opendatahub.io/dashboard=true --no-headers -o jsonpath='{.items[*].metadata.name}'"
   - name: inference_service_name
     description: Name for the InferenceService
     required: true
+    example: "my-model-from-registry"
+    hint: "Lowercase letters, numbers, hyphens. Max 63 chars."
   - name: s3_connection_name
     description: S3 connection secret in the target project
     required: true
+    discover_cmd: "oc get secret -n {project_namespace} -l opendatahub.io/connection-type=s3 --no-headers -o jsonpath='{.items[*].metadata.name}' 2>/dev/null"
+  - name: model_format
+    description: Model format name
+    required: false
+    default: vllm
+    enum: ["vllm", "openvino_ir", "onnx", "sklearn", "xgboost", "pytorch"]
+  - name: model_type
+    description: "Model type: Predictive or Generative"
+    required: false
+    default: Generative
+    enum: ["Predictive", "Generative"]
 
 steps:
   - id: get-registry-token
-    confidence: inferred
+    confidence: doc-derived
     description: Get auth token for registry API
     requires:
       - type: model-registry-instance
@@ -51,7 +87,7 @@ steps:
       on_fail: STOP
 
   - id: get-registry-url
-    confidence: inferred
+    confidence: doc-derived
     description: Get model registry REST API URL
     action:
       type: query
@@ -65,7 +101,7 @@ steps:
       on_fail: STOP
 
   - id: fetch-model-version
-    confidence: inferred
+    confidence: doc-derived
     description: Fetch model version metadata from registry
     action:
       type: api_call
@@ -82,7 +118,7 @@ steps:
       on_fail: STOP
 
   - id: fetch-model-artifact
-    confidence: inferred
+    confidence: doc-derived
     description: Fetch artifact to get model storage URI
     action:
       type: api_call
@@ -99,8 +135,16 @@ steps:
       on_fail: STOP
 
   - id: deploy-inference-service
-    confidence: inferred
-    description: Create InferenceService using URI from model registry
+    confidence: doc-derived
+    description: >
+      Create InferenceService with CORRECT model registry linking labels.
+      From odh-model-controller source (ModelRegistryInferenceServiceReconciler):
+      - Labels use prefix 'modelregistry.opendatahub.io/' (NOT 'model-registry/')
+      - These are LABELS on metadata, NOT annotations
+      - model-type annotation is REQUIRED (Generative|Predictive)
+      - connections/connection-path annotations are REQUIRED
+      - The controller auto-creates: Route, ServiceMonitor, PodMonitor
+      - Do NOT create Route manually — status.url is populated automatically
     pre_check:
       command: "oc get inferenceservice {{ inference_service_name }} -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
       expected: "1"
@@ -117,17 +161,24 @@ steps:
           namespace: {{ project_namespace }}
           labels:
             opendatahub.io/dashboard: "true"
+            modelregistry.opendatahub.io/model-version-id: "{{ model_version_id }}"
+            modelregistry.opendatahub.io/registered-model-id: "{{ model_version.registeredModelId }}"
+            modelregistry.opendatahub.io/name: "{{ registry_name }}"
+            modelregistry.opendatahub.io/namespace: "{{ registry_namespace }}"
           annotations:
-            serving.kserve.io/deploymentMode: RawDeployment
             openshift.io/display-name: "{{ inference_service_name }}"
-            model-registry/model-version-id: "{{ model_version_id }}"
-            model-registry/registered-model-id: "{{ model_version.registeredModelId }}"
+            openshift.io/description: ""
+            opendatahub.io/model-type: "{{ model_type }}"
+            opendatahub.io/connections: "{{ s3_connection_name }}"
+            opendatahub.io/connection-path: "{{ artifacts_response.items[0].uri }}"
+            security.opendatahub.io/enable-auth: "false"
+            serving.kserve.io/deploymentMode: RawDeployment
         spec:
           predictor:
             minReplicas: 1
             model:
               modelFormat:
-                name: vllm
+                name: {{ model_format }}
               storage:
                 key: {{ s3_connection_name }}
                 path: "{{ artifacts_response.items[0].uri }}"
@@ -138,19 +189,51 @@ steps:
       poll_interval: "20s"
       on_fail: STOP
     rollback: "oc delete inferenceservice {{ inference_service_name }} -n {{ project_namespace }}"
+
+  - id: get-endpoint-url
+    confidence: doc-derived
+    description: >
+      Get the model endpoint from status.url.
+      The OpenShift Route is auto-created by odh-model-controller — do NOT create it manually.
+      status.url is populated automatically once the Route is ready.
+    action:
+      type: query
+      command: "oc get inferenceservice {{ inference_service_name }} -n {{ project_namespace }} -o jsonpath='{.status.url}'"
+      store_as: model_url
+    post_check:
+      assert: model_url is not empty
+      command: "oc get inferenceservice {{ inference_service_name }} -n {{ project_namespace }} -o jsonpath='{.status.url}'"
+      expected_min: 1
+      timeout: "60s"
+      on_fail: STOP
     return: |
       ✓ Model deployed from registry.
 
-      Registry model version: {{ model_version_id }}
-      InferenceService: {{ inference_service_name }}
-      Project: {{ project_namespace }}
+      Registry version:  {{ model_version_id }}
+      InferenceService:  {{ inference_service_name }}
+      Model type:        {{ model_type }}
+      Endpoint:          {{ model_url }}
+
+      Registry labels set (modelregistry.opendatahub.io/*):
+        model-version-id:    {{ model_version_id }}
+        registered-model-id: {{ model_version.registeredModelId }}
+        name:                {{ registry_name }}
+        namespace:           {{ registry_namespace }}
 
       Dashboard: Projects → {{ project_namespace }} → Models and model servers
-      Model Registry: model-registry/{{ model_version.registeredModelId }} shows this deployment
+      Model Registry: shows this deployment linked to version {{ model_version_id }}
+
+      Auto-created by odh-model-controller (do not create manually):
+        ✓ OpenShift Route
+        ✓ ServiceMonitor (Prometheus)
+        ✓ PodMonitor
 
 known_bad_patterns:
-  - "never hardcode model URIs in InferenceService — always fetch from registry so the registry stays the source of truth"
-  - "never deploy without the model-registry/* annotations — the dashboard uses them to link model registry → deployment"
+  - "CRITICAL: model registry labels must use prefix 'modelregistry.opendatahub.io/' not 'model-registry/'"
+  - "CRITICAL: model registry links must be LABELS not annotations — wrong type means the controller won't recognize them"
+  - "CRITICAL: never manually create an OpenShift Route — odh-model-controller creates it automatically"
+  - "never create ServiceMonitor or PodMonitor manually — auto-created by odh-model-controller"
+  - "never set security.opendatahub.io/enable-auth=true without understanding that it triggers automatic ClusterRoleBinding creation"
 
 rollback_order:
   - "oc delete inferenceservice {{ inference_service_name }} -n {{ project_namespace }}"

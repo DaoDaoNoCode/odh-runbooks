@@ -11,6 +11,12 @@ description: >
   - Resources path: spec.predictor.model.resources (NOT spec.predictor.resources)
   - shm emptyDir volume MUST be present in ServingRuntime containers
   - Supports model args via spec.predictor.model.args
+
+  WHAT odh-model-controller AUTO-CREATES (do not create manually):
+  - OpenShift Route — auto-created, status.url populated when ready
+  - ServiceMonitor/PodMonitor — auto-created for Prometheus metrics
+  - ClusterRoleBinding — auto-created only when enable-auth=true
+  Source: github.com/opendatahub-io/odh-model-controller
 rhoai_version_tested: null
 confidence_overall: doc-derived
 

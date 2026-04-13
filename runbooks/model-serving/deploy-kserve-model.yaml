@@ -13,6 +13,12 @@ description: >
   - Storage: spec.predictor.model.storage.key + storage.path (NOT storageUri for S3)
   - Resources: spec.predictor.model.resources (NOT spec.predictor.resources)
   Dashboard only supports RawDeployment mode.
+
+  WHAT odh-model-controller AUTO-CREATES (do not create manually):
+  - OpenShift Route — created automatically, status.url is populated when ready
+  - ServiceMonitor/PodMonitor — auto-created for Prometheus metrics
+  - ClusterRoleBinding — auto-created only when enable-auth=true
+  Source: github.com/opendatahub-io/odh-model-controller (KserveRawInferenceServiceReconciler)
 rhoai_version_tested: null
 confidence_overall: doc-derived
 

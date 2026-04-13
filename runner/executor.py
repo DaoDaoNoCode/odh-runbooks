@@ -179,8 +179,10 @@ class RunbookExecutor:
     # ──────────────────────────────────────────────────────────────────────────
 
     async def _run_plan(self) -> bool:
+        # Use only the first line of the description to keep the panel compact
+        first_line = self.runbook.description.strip().split("\n")[0].strip()
         console.print(Panel(
-            f"[bold]{self.runbook.name}[/bold]\n\n{self.runbook.description}\n\n"
+            f"[bold]{self.runbook.name}[/bold]\n\n{first_line}\n\n"
             f"Mode: [yellow]plan[/yellow] — no changes will be made",
             title="[yellow]ODH Runbook Planner[/yellow]"
         ))
@@ -274,8 +276,11 @@ class RunbookExecutor:
             console.print(f"\n[yellow]Will auto-provision: {', '.join(auto_provisions)}[/yellow]")
 
         console.print(f"\n[bold]To execute:[/bold]")
-        param_str = " ".join(f"-p {k}={v}" for k, v in self.params.items())
-        # Use the actual file path (self.runbook_path) if available, not the YAML name field
+        # Skip empty-value params (e.g. deployed_model_url=) — cleaner output
+        param_str = " ".join(
+            f"-p {k}={v}" for k, v in self.params.items()
+            if v is not None and str(v).strip() != ""
+        )
         display_name = self.runbook_path or self.runbook.name
         console.print(f"  odh run {display_name} {param_str}")
 

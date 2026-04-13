@@ -78,10 +78,11 @@ class ParameterWizard:
         # ── Phase 3: Offer to customize optional params ───────────────────
         if optional:
             console.print(f"\n[dim]{len(optional)} optional parameter(s) set to defaults:[/dim]")
-            for p in optional[:5]:  # show first 5
-                console.print(f"  [dim]• {p.name} = {self.params.get(p.name, p.default)}[/dim]")
-            if len(optional) > 5:
-                console.print(f"  [dim]• ...and {len(optional)-5} more[/dim]")
+            for p in optional:  # show all — no truncation
+                val = self.params.get(p.name, p.default)
+                # Skip showing empty values to reduce noise
+                display_val = val if val is not None and str(val).strip() != "" else "[dim](empty)[/dim]"
+                console.print(f"  [dim]• {p.name} = {display_val}[/dim]")
 
             if Confirm.ask("\nCustomize any optional parameters?", default=False):
                 console.print("\n[bold]Optional parameters:[/bold]")

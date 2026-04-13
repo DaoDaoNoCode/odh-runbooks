@@ -366,7 +366,11 @@ def wizard(runbook_name: str, param: tuple[str, ...]):
         sys.exit(0 if success else 1)
     else:
         console.print("\n[dim]To run later:[/dim]")
-        param_str = " ".join(f"-p {k}={v}" for k, v in params.items())
+        # Skip empty values for cleaner output
+        param_str = " ".join(
+            f"-p {k}={v}" for k, v in params.items()
+            if v is not None and str(v).strip() != ""
+        )
         console.print(f"  odh run {runbook_name} {param_str}")
 
 

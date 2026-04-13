@@ -94,7 +94,7 @@ DEPENDENCY_REGISTRY: dict[str, dict] = {
 
     # ── Namespace ─────────────────────────────────────────────────────────────
     "namespace": {
-        "check": "oc get namespace {name} --no-headers 2>/dev/null | wc -l | tr -d ' '",
+        "check": "oc get namespace {{ name }} --no-headers 2>/dev/null | wc -l | tr -d ' '",
         "expected_min": 1,
         "resolver": "projects/create-project",
         "resolver_params": lambda req, ctx: {
@@ -182,7 +182,7 @@ DEPENDENCY_REGISTRY: dict[str, dict] = {
 
     # ── Project-level services ─────────────────────────────────────────────────
     "pipeline-server": {
-        "check": "oc get dspa -n {namespace} --no-headers 2>/dev/null | wc -l | tr -d ' '",
+        "check": "oc get dspa -n {{ namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '",
         "expected_min": 1,
         "resolver": "dependencies/provision-pipeline-server",
         "resolver_params": lambda req, ctx: {
@@ -253,11 +253,22 @@ class DependencyResolver:
         self.params = params
 
     def _render(self, text: str, req: Requirement) -> str:
+        # req.name and req.namespace may themselves be Jinja2 templates
+        # e.g. name: "{{ project_namespace }}" — render them first with params
+        base_vars = {**self.params, **self.context}
+        try:
+            rendered_name = Template(req.name or "").render(**base_vars)
+        except Exception:
+            rendered_name = req.name or ""
+        try:
+            rendered_namespace = Template(req.namespace or "").render(**base_vars)
+        except Exception:
+            rendered_namespace = req.namespace or ""
+
         all_vars = {
-            **self.params,
-            **self.context,
-            "namespace": req.namespace or self.params.get("project_namespace", ""),
-            "name": req.name or "",
+            **base_vars,
+            "namespace": rendered_namespace or self.params.get("project_namespace", ""),
+            "name": rendered_name,
         }
         try:
             return Template(text).render(**all_vars)

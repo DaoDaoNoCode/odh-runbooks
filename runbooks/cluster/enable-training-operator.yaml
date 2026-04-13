@@ -65,11 +65,52 @@ steps:
       Next step: Submit a training job
         odh run model-training/submit-pytorch-job
 
+  - id: enable-training-jobs-flag
+    confidence: doc-derived
+    description: >
+      Enable trainingJobs tech preview flag in OdhDashboardConfig.
+      Unlike disable* flags (default off), trainingJobs is a positive tech preview
+      flag that must be explicitly set to true for the Training Jobs section to
+      appear in the dashboard. Defaults to false/undefined if not set.
+    action:
+      type: query
+      command: |
+        ODH_NS=$(oc get odhdashboardconfig --all-namespaces --no-headers -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || echo 'redhat-ods-applications')
+        CFG=$(oc get odhdashboardconfig -n $ODH_NS -o name 2>/dev/null | head -1)
+        if [ -z "$CFG" ]; then
+          echo "ok: OdhDashboardConfig not found — skipping"
+          exit 0
+        fi
+        CURRENT=$(oc get odhdashboardconfig -n $ODH_NS \
+          -o jsonpath='{.spec.dashboardConfig.trainingJobs}' 2>/dev/null)
+        if [ "$CURRENT" != "true" ]; then
+          echo "Enabling trainingJobs tech preview flag..."
+          oc patch $CFG -n $ODH_NS --type merge \
+            -p '{"spec":{"dashboardConfig":{{"trainingJobs":true}}}}'
+          echo "Patched: trainingJobs=true"
+        else
+          echo "Already enabled: trainingJobs=true"
+        fi
+        echo "done"
+      store_as: dashboard_flag_status
+    post_check:
+      command: |
+        ODH_NS=$(oc get odhdashboardconfig --all-namespaces --no-headers -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || echo 'redhat-ods-applications')
+        VAL=$(oc get odhdashboardconfig -n $ODH_NS \
+          -o jsonpath='{.spec.dashboardConfig.trainingJobs}' 2>/dev/null)
+        [ "$VAL" = "true" ] && echo "ok" || echo "not enabled"
+      expected: "ok"
+      timeout: "30s"
+      on_fail: STOP
+    on_fail_hint: >
+      Could not enable trainingJobs flag in OdhDashboardConfig. Manual fix: oc patch $(oc get odhdashboardconfig -n redhat-ods-applications -o name | head -1) -n redhat-ods-applications --type merge -p '{"spec":{"dashboardConfig":{"trainingJobs":true}}}'
+
 source_repos:
   - "https://github.com/kubeflow/training-operator"
   - "https://github.com/opendatahub-io/opendatahub-operator"
 
 known_bad_patterns:
+  - "never assume the component shows in the dashboard just because the DSC component is Managed — also check OdhDashboardConfig feature flags (disable* = false, tech preview = true)"
   - "never submit PyTorchJob without enabling the Training Operator first — the CRD won't exist"
   - "never use the training operator without disabling Istio sidecar injection in job pods"
 

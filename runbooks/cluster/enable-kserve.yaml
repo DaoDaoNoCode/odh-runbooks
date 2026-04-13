@@ -115,11 +115,50 @@ steps:
         - Deploy a model: odh run model-serving/deploy-kserve-model -p project_namespace=<ns> -p model_uri=<uri>
         - Dashboard: Projects → <your-project> → Models and model servers
 
+  - id: verify-dashboard-config
+    confidence: doc-derived
+    description: >
+      Verify OdhDashboardConfig shows model serving in the dashboard.
+      The dashboard checks disableModelServing and disableKServe flags — if either
+      is explicitly true the Models section won't appear even with KServe running.
+      Auto-fixes if disabled.
+    action:
+      type: query
+      command: |
+        ODH_NS=$(oc get odhdashboardconfig --all-namespaces --no-headers -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || echo 'redhat-ods-applications')
+        CFG=$(oc get odhdashboardconfig -n $ODH_NS -o name 2>/dev/null | head -1)
+        if [ -z "$CFG" ]; then
+          echo "ok: OdhDashboardConfig not found (older ODH version — skipping)"
+          exit 0
+        fi
+        DIS_MS=$(oc get odhdashboardconfig -n $ODH_NS -o jsonpath='{.spec.dashboardConfig.disableModelServing}' 2>/dev/null)
+        DIS_KS=$(oc get odhdashboardconfig -n $ODH_NS -o jsonpath='{.spec.dashboardConfig.disableKServe}' 2>/dev/null)
+        if [ "$DIS_MS" = "true" ] || [ "$DIS_KS" = "true" ]; then
+          echo "Fixing dashboard flags: disableModelServing=$DIS_MS disableKServe=$DIS_KS"
+          oc patch $CFG -n $ODH_NS --type merge \
+            -p '{"spec":{"dashboardConfig":{"disableModelServing":false,"disableKServe":false}}}'
+        else
+          echo "OK: model serving flags are not disabled"
+        fi
+        echo "done"
+      store_as: dashboard_flag_status
+    post_check:
+      command: |
+        ODH_NS=$(oc get odhdashboardconfig --all-namespaces --no-headers -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || echo 'redhat-ods-applications')
+        DIS=$(oc get odhdashboardconfig -n $ODH_NS -o jsonpath='{.spec.dashboardConfig.disableModelServing}' 2>/dev/null)
+        [ "$DIS" != "true" ] && echo "ok" || echo "blocked"
+      expected: "ok"
+      timeout: "30s"
+      on_fail: STOP
+    on_fail_hint: >
+      Dashboard config is blocking model serving. Fix: oc patch $(oc get odhdashboardconfig -n redhat-ods-applications -o name | head -1) -n redhat-ods-applications --type merge -p '{"spec":{"dashboardConfig":{"disableModelServing":false,"disableKServe":false}}}'
+
 source_repos:
   - "https://github.com/opendatahub-io/opendatahub-operator"
   - "https://github.com/kserve/kserve"
 
 known_bad_patterns:
+  - "never assume the component shows in the dashboard just because the DSC component is Managed — also check OdhDashboardConfig feature flags (disable* = false, tech preview = true)"
   - "never enable KServe with Serverless mode without first installing OpenShift Service Mesh and Serverless — it will fail silently"
   - "never delete the InferenceService CRD manually — it will break all deployed models"
   - "never set managementState to Unmanaged unless you intend to manage KServe yourself"

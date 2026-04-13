@@ -239,12 +239,53 @@ steps:
         - Dashboard: https://<odh-dashboard>/develop-train/mlflow/experiments?workspace={{ project_namespace }}
       ──────────────────────────────────────────────────────────────
 
+  - id: enable-mlflow-dashboard-flag
+    confidence: doc-derived
+    description: >
+      Enable mlflow tech preview flag in OdhDashboardConfig.
+      MLflow is a tech preview feature — the dashboardConfig.mlflow flag must be
+      explicitly set to true for the MLflow section to appear in the dashboard.
+      Defaults to false/undefined. This is separate from the DSC component enable.
+    action:
+      type: query
+      command: |
+        ODH_NS=$(oc get odhdashboardconfig --all-namespaces --no-headers -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || echo 'redhat-ods-applications')
+        CFG=$(oc get odhdashboardconfig -n $ODH_NS -o name 2>/dev/null | head -1)
+        if [ -z "$CFG" ]; then
+          echo "ok: OdhDashboardConfig not found — skipping"
+          exit 0
+        fi
+        CURRENT=$(oc get odhdashboardconfig -n $ODH_NS \
+          -o jsonpath='{.spec.dashboardConfig.mlflow}' 2>/dev/null)
+        if [ "$CURRENT" != "true" ]; then
+          echo "Enabling mlflow tech preview flag..."
+          oc patch $CFG -n $ODH_NS --type merge \
+            -p '{"spec":{"dashboardConfig":{{"mlflow":true}}}}'
+          echo "Patched: mlflow=true"
+        else
+          echo "Already enabled: mlflow=true"
+        fi
+        echo "done"
+      store_as: dashboard_flag_status
+    post_check:
+      command: |
+        ODH_NS=$(oc get odhdashboardconfig --all-namespaces --no-headers -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || echo 'redhat-ods-applications')
+        VAL=$(oc get odhdashboardconfig -n $ODH_NS \
+          -o jsonpath='{.spec.dashboardConfig.mlflow}' 2>/dev/null)
+        [ "$VAL" = "true" ] && echo "ok" || echo "not enabled"
+      expected: "ok"
+      timeout: "30s"
+      on_fail: STOP
+    on_fail_hint: >
+      Could not enable mlflow tech preview flag in OdhDashboardConfig. Manual fix: oc patch $(oc get odhdashboardconfig -n redhat-ods-applications -o name | head -1) -n redhat-ods-applications --type merge -p '{"spec":{"dashboardConfig":{"mlflow":true}}}'
+
 source_repos:
   - "https://github.com/mlflow/mlflow"
   - "https://github.com/opendatahub-io/opendatahub-operator"
   - "https://github.com/opendatahub-io/odh-dashboard"
 
 known_bad_patterns:
+  - "never assume the component shows in the dashboard just because the DSC component is Managed — also check OdhDashboardConfig feature flags (disable* = false, tech preview = true)"
   - "CRITICAL: never deploy MLflow as a standalone Deployment — use the MLflow Operator CR (apiVersion: mlflow.opendatahub.io/v1 Kind: MLflow)"
   - "CRITICAL: the MLflow CR is cluster-scoped — never put it in a namespace, never create multiple MLflow CRs"
   - "never deploy MLflow server pod directly into the user project namespace — the operator handles deployment in the ODH namespace"

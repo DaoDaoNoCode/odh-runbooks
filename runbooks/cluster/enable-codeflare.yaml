@@ -98,6 +98,42 @@ steps:
 
       Next step: odh run distributed-workloads/submit-ray-job
 
+  - id: verify-dashboard-config
+    confidence: doc-derived
+    description: >
+      Verify OdhDashboardConfig shows Distributed Workloads in the dashboard.
+      Checks disableDistributedWorkloads — if true the workload metrics section
+      won't appear even with CodeFlare/Ray/Kueue running.
+    action:
+      type: query
+      command: |
+        ODH_NS=$(oc get odhdashboardconfig --all-namespaces --no-headers -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || echo 'redhat-ods-applications')
+        CFG=$(oc get odhdashboardconfig -n $ODH_NS -o name 2>/dev/null | head -1)
+        if [ -z "$CFG" ]; then
+          echo "ok: OdhDashboardConfig not found (older ODH version — skipping)"
+          exit 0
+        fi
+        DIS=$(oc get odhdashboardconfig -n $ODH_NS -o jsonpath='{.spec.dashboardConfig.disableDistributedWorkloads}' 2>/dev/null)
+        if [ "$DIS" = "true" ]; then
+          echo "Fixing: disableDistributedWorkloads=true — patching to false"
+          oc patch $CFG -n $ODH_NS --type merge \
+            -p '{"spec":{"dashboardConfig":{"disableDistributedWorkloads":false}}}'
+        else
+          echo "OK: disableDistributedWorkloads is not true"
+        fi
+        echo "done"
+      store_as: dashboard_flag_status
+    post_check:
+      command: |
+        ODH_NS=$(oc get odhdashboardconfig --all-namespaces --no-headers -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || echo 'redhat-ods-applications')
+        DIS=$(oc get odhdashboardconfig -n $ODH_NS -o jsonpath='{.spec.dashboardConfig.disableDistributedWorkloads}' 2>/dev/null)
+        [ "$DIS" != "true" ] && echo "ok" || echo "blocked"
+      expected: "ok"
+      timeout: "30s"
+      on_fail: STOP
+    on_fail_hint: >
+      Distributed Workloads blocked in dashboard config. Fix: patch odhdashboardconfig --type merge -p '{"spec":{"dashboardConfig":{"disableDistributedWorkloads":false}}}'
+
 source_repos:
   - "https://github.com/project-codeflare/codeflare-operator"
   - "https://github.com/project-codeflare/codeflare-sdk"
@@ -105,6 +141,7 @@ source_repos:
   - "https://github.com/opendatahub-io/opendatahub-operator"
 
 known_bad_patterns:
+  - "never assume the component shows in the dashboard just because the DSC component is Managed — also check OdhDashboardConfig feature flags (disable* = false, tech preview = true)"
   - "never install the community CodeFlare operator separately — ODH manages its own fork and they cannot coexist on the same cluster"
   - "never enable CodeFlare without also enabling Kueue — jobs will not be queued correctly"
   - "never submit a RayJob without first creating a Kueue ResourceFlavor and ClusterQueue"

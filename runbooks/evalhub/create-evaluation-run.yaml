@@ -135,6 +135,66 @@ steps:
       on_fail: STOP
     rollback: "oc delete evalhub {{ evalhub_instance_name }} -n {{ project_namespace }}"
 
+  - id: verify-evalhub-dashboard-visibility
+    confidence: doc-derived
+    description: >
+      Verify EvalHub will appear in the dashboard. Two layers beyond DSC:
+      1. OdhDashboardConfig.disableLMEval must be false (dashboard feature flag gate)
+      2. Module federation: the operator deploys an EvalHub module federation service
+         that the dashboard proxies via /_mf/evalHub. Without it the /evaluation
+         route shows blank even if the EvalHub CR is Ready.
+      Auto-fixes the dashboard config flag if blocked.
+    action:
+      type: query
+      command: |
+        ODH_NS=$(oc get odhdashboardconfig --all-namespaces --no-headers \
+          -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || echo 'redhat-ods-applications')
+        CFG=$(oc get odhdashboardconfig -n $ODH_NS -o name 2>/dev/null | head -1)
+
+        # Layer 2: OdhDashboardConfig flag
+        if [ -n "$CFG" ]; then
+          DIS=$(oc get odhdashboardconfig -n $ODH_NS \
+            -o jsonpath='{.spec.dashboardConfig.disableLMEval}' 2>/dev/null)
+          if [ "$DIS" = "true" ]; then
+            echo "Fixing: disableLMEval=true"
+            oc patch $CFG -n $ODH_NS --type merge \
+              -p '{"spec":{"dashboardConfig":{"disableLMEval":false}}}'
+          else
+            echo "OK: disableLMEval not disabled"
+          fi
+        fi
+
+        # Layer 4: Module federation service
+        echo "=== EvalHub pods (module federation) ==="
+        oc get pods -n {{ project_namespace }} --no-headers 2>/dev/null | \
+          grep -iE "evalhub|eval-hub|lmeval" || \
+          echo "(none yet — operator reconciles this after EvalHub CR is Ready)"
+
+        echo "=== EvalHub service ==="
+        oc get service -n {{ project_namespace }} --no-headers 2>/dev/null | \
+          grep -iE "evalhub|eval-hub|lmeval" || \
+          echo "(none yet)"
+        echo "done"
+      store_as: evalhub_visibility_status
+    post_check:
+      command: |
+        ODH_NS=$(oc get odhdashboardconfig --all-namespaces --no-headers \
+          -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || echo 'redhat-ods-applications')
+        DIS=$(oc get odhdashboardconfig -n $ODH_NS \
+          -o jsonpath='{.spec.dashboardConfig.disableLMEval}' 2>/dev/null)
+        [ "$DIS" != "true" ] && echo "ok" || echo "blocked"
+      expected: "ok"
+      timeout: "30s"
+      on_fail: STOP
+    on_fail_hint: >
+      EvalHub blocked by OdhDashboardConfig.disableLMEval=true.
+      Fix: oc patch $(oc get odhdashboardconfig -n redhat-ods-applications -o name | head -1)
+      -n redhat-ods-applications --type merge
+      -p {"spec":{"dashboardConfig":{"disableLMEval":false}}}
+      If page is blank: EvalHub module federation service not running.
+      Check: oc get pods -n {{ project_namespace }} | grep -i evalhub
+      The TrustyAI operator deploys this when EvalHub CR reaches Ready.
+
   - id: create-evalhub-rbac
     confidence: doc-derived
     description: Create RBAC roles for EvalHub and MLflow access

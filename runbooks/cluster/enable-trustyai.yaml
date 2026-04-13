@@ -64,12 +64,53 @@ steps:
       Next step: Deploy a TrustyAIService in your project:
         odh run trustyai/enable-trustyai-service -p project_namespace=<ns>
 
+  - id: verify-dashboard-config
+    confidence: doc-derived
+    description: >
+      Verify OdhDashboardConfig shows TrustyAI and LMEval in the dashboard.
+      Checks disableTrustyBiasMetrics (bias monitoring tab) and disableLMEval
+      (evaluation runs section). Auto-fixes if either is explicitly disabled.
+    action:
+      type: query
+      command: |
+        ODH_NS=$(oc get odhdashboardconfig --all-namespaces --no-headers -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || echo 'redhat-ods-applications')
+        CFG=$(oc get odhdashboardconfig -n $ODH_NS -o name 2>/dev/null | head -1)
+        if [ -z "$CFG" ]; then
+          echo "ok: OdhDashboardConfig not found (older ODH version — skipping)"
+          exit 0
+        fi
+        DIS_TRUSTY=$(oc get odhdashboardconfig -n $ODH_NS -o jsonpath='{.spec.dashboardConfig.disableTrustyBiasMetrics}' 2>/dev/null)
+        DIS_LMEVAL=$(oc get odhdashboardconfig -n $ODH_NS -o jsonpath='{.spec.dashboardConfig.disableLMEval}' 2>/dev/null)
+        NEEDS_PATCH=false
+        [ "$DIS_TRUSTY" = "true" ] && NEEDS_PATCH=true
+        [ "$DIS_LMEVAL" = "true" ] && NEEDS_PATCH=true
+        if [ "$NEEDS_PATCH" = "true" ]; then
+          echo "Fixing: disableTrustyBiasMetrics=$DIS_TRUSTY disableLMEval=$DIS_LMEVAL"
+          oc patch $CFG -n $ODH_NS --type merge \
+            -p '{"spec":{"dashboardConfig":{"disableTrustyBiasMetrics":false,"disableLMEval":false}}}'
+        else
+          echo "OK: TrustyAI and LMEval flags are not disabled"
+        fi
+        echo "done"
+      store_as: dashboard_flag_status
+    post_check:
+      command: |
+        ODH_NS=$(oc get odhdashboardconfig --all-namespaces --no-headers -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || echo 'redhat-ods-applications')
+        DIS=$(oc get odhdashboardconfig -n $ODH_NS -o jsonpath='{.spec.dashboardConfig.disableLMEval}' 2>/dev/null)
+        [ "$DIS" != "true" ] && echo "ok" || echo "blocked"
+      expected: "ok"
+      timeout: "30s"
+      on_fail: STOP
+    on_fail_hint: >
+      TrustyAI/LMEval are blocked in dashboard config. Fix: patch odhdashboardconfig --type merge -p '{"spec":{"dashboardConfig":{"disableTrustyBiasMetrics":false,"disableLMEval":false}}}'
+
 source_repos:
   - "https://github.com/trustyai-explainability/trustyai-explainability"
   - "https://github.com/trustyai-explainability/trustyai-service-operator"
   - "https://github.com/opendatahub-io/opendatahub-operator"
 
 known_bad_patterns:
+  - "never assume the component shows in the dashboard just because the DSC component is Managed — also check OdhDashboardConfig feature flags (disable* = false, tech preview = true)"
   - "never create TrustyAIService before enabling TrustyAI in DSC — the operator won't be present"
   - "never set permitCodeExecution=deny if you want EvalHub to run evaluation jobs"
 

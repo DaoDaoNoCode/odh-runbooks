@@ -158,11 +158,47 @@ steps:
         Body: {"features": ["view:field"], "entities": {"id": [1,2,3]}}
       ─────────────────────────────────────────────────────
 
+  - id: verify-dashboard-config
+    confidence: doc-derived
+    description: >
+      Verify OdhDashboardConfig shows Feature Store in the dashboard.
+      Checks disableFeatureStore — if true the feature store section won't appear.
+    action:
+      type: query
+      command: |
+        ODH_NS=$(oc get odhdashboardconfig --all-namespaces --no-headers -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || echo 'redhat-ods-applications')
+        CFG=$(oc get odhdashboardconfig -n $ODH_NS -o name 2>/dev/null | head -1)
+        if [ -z "$CFG" ]; then
+          echo "ok: OdhDashboardConfig not found (older ODH version — skipping)"
+          exit 0
+        fi
+        DIS=$(oc get odhdashboardconfig -n $ODH_NS -o jsonpath='{.spec.dashboardConfig.disableFeatureStore}' 2>/dev/null)
+        if [ "$DIS" = "true" ]; then
+          echo "Fixing: disableFeatureStore=true — patching to false"
+          oc patch $CFG -n $ODH_NS --type merge \
+            -p '{"spec":{"dashboardConfig":{"disableFeatureStore":false}}}'
+        else
+          echo "OK: disableFeatureStore is not true"
+        fi
+        echo "done"
+      store_as: dashboard_flag_status
+    post_check:
+      command: |
+        ODH_NS=$(oc get odhdashboardconfig --all-namespaces --no-headers -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || echo 'redhat-ods-applications')
+        DIS=$(oc get odhdashboardconfig -n $ODH_NS -o jsonpath='{.spec.dashboardConfig.disableFeatureStore}' 2>/dev/null)
+        [ "$DIS" != "true" ] && echo "ok" || echo "blocked"
+      expected: "ok"
+      timeout: "30s"
+      on_fail: STOP
+    on_fail_hint: >
+      Feature Store blocked in dashboard config. Fix: patch odhdashboardconfig --type merge -p '{"spec":{"dashboardConfig":{"disableFeatureStore":false}}}'
+
 source_repos:
   - "https://github.com/feast-dev/feast"
   - "https://github.com/opendatahub-io/opendatahub-operator"
 
 known_bad_patterns:
+  - "never assume the component shows in the dashboard just because the DSC component is Managed — also check OdhDashboardConfig feature flags (disable* = false, tech preview = true)"
   - "never use sqlite online store in production — it doesn't support concurrent access"
   - "never run feast materialize without first running feast apply — registry must exist"
   - "never define features that aren't in the offline store schema — they will silently return None"

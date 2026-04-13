@@ -338,6 +338,84 @@ When a step has `requires:`, check if the dependency exists. If not, run the res
 
 ---
 
+## Dashboard visibility — 4 layers to check
+
+When a component is enabled but doesn't show in the dashboard, work through these layers in order.
+**The runbooks handle all of these** — but if debugging manually, check each layer:
+
+### Layer 1 — DSC component state
+```bash
+oc get dsc -o jsonpath='{.items[0].spec.components}' | python3 -m json.tool
+# component.managementState must be "Managed" (not "Removed")
+```
+
+### Layer 2 — OdhDashboardConfig feature flags (most common cause of "component missing")
+
+The dashboard checks these flags from `OdhDashboardConfig.spec.dashboardConfig`.
+Two patterns:
+- **`disable*` flags** (default `false`): if explicitly set `true`, the section is hidden
+- **Tech preview flags** (default `false`/undefined): must be explicitly `true` to show
+
+```bash
+ODH_NS=$(oc get odhdashboardconfig --all-namespaces --no-headers \
+  -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || echo 'redhat-ods-applications')
+oc get odhdashboardconfig -n $ODH_NS -o jsonpath='{.spec.dashboardConfig}' | python3 -m json.tool
+```
+
+| Component | Flag to check | Fix |
+|---|---|---|
+| Model serving / KServe | `disableModelServing`, `disableKServe` | set to `false` |
+| Pipelines | `disablePipelines` | set to `false` |
+| TrustyAI bias metrics | `disableTrustyBiasMetrics` | set to `false` |
+| EvalHub / LM Eval | `disableLMEval` | set to `false` |
+| Model Registry | `disableModelRegistry` | set to `false` |
+| Distributed Workloads | `disableDistributedWorkloads` | set to `false` |
+| Feature Store | `disableFeatureStore` | set to `false` |
+| MLflow (**tech preview**) | `mlflow` | set to `true` |
+| Training Jobs (**tech preview**) | `trainingJobs` | set to `true` |
+
+Fix a blocked component:
+```bash
+CFG=$(oc get odhdashboardconfig -n $ODH_NS -o name | head -1)
+# Example: unblock model serving
+oc patch $CFG -n $ODH_NS --type merge \
+  -p '{"spec":{"dashboardConfig":{"disableModelServing":false,"disableKServe":false}}}'
+
+# Enable MLflow tech preview
+oc patch $CFG -n $ODH_NS --type merge \
+  -p '{"spec":{"dashboardConfig":{"mlflow":true}}}'
+```
+
+### Layer 3 — DSCI capabilities
+```bash
+oc get dsci -o jsonpath='{.items[0].status.conditions}' | python3 -m json.tool
+# All required capabilities must have status: "True"
+# This is automatic when DSCI is healthy — rarely needs manual intervention
+```
+
+### Layer 4 — Module federation (EvalHub only)
+
+EvalHub is a **federated module** — the dashboard loads its UI from a separate service at runtime
+via webpack module federation (`/_mf/evalHub/remoteEntry.js`). The TrustyAI operator deploys
+this service when an EvalHub CR reaches Ready status.
+
+```bash
+# Check the module federation service exists and is running
+oc get pods -n <project-ns> | grep -iE "evalhub|eval-hub|lmeval"
+oc get service -n <project-ns> | grep -iE "evalhub|eval-hub|lmeval"
+
+# Test the dashboard can reach it (from the dashboard pod)
+DASH_POD=$(oc get pod -n $ODH_NS -l app=rhods-dashboard -o name | head -1)
+oc exec $DASH_POD -n $ODH_NS -- curl -s -o /dev/null -w "%{http_code}" \
+  http://localhost:8080/_mf/evalHub/remoteEntry.js
+# Should return 200; returns 503 if the EvalHub service is not running
+```
+
+If the EvalHub page shows blank (no error, just empty): the module federation service is not up yet.
+Wait for the EvalHub CR to fully reconcile: `oc get evalhub -n <ns> -o jsonpath='{.status.phase}'`
+
+---
+
 ## Key technical facts
 
 **The dashboard host:**

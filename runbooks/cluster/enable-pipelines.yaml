@@ -73,12 +73,49 @@ steps:
 
       Next step: odh run pipelines/create-pipeline-server -p project_namespace=<ns> -p ...
 
+  - id: verify-dashboard-config
+    confidence: doc-derived
+    description: >
+      Verify OdhDashboardConfig shows pipelines in the dashboard.
+      The dashboard checks disablePipelines — if true the Pipelines tab won't
+      appear even with the DSP operator running.
+    action:
+      type: query
+      command: |
+        ODH_NS=$(oc get odhdashboardconfig --all-namespaces --no-headers -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || echo 'redhat-ods-applications')
+        CFG=$(oc get odhdashboardconfig -n $ODH_NS -o name 2>/dev/null | head -1)
+        if [ -z "$CFG" ]; then
+          echo "ok: OdhDashboardConfig not found (older ODH version — skipping)"
+          exit 0
+        fi
+        DIS=$(oc get odhdashboardconfig -n $ODH_NS -o jsonpath='{.spec.dashboardConfig.disablePipelines}' 2>/dev/null)
+        if [ "$DIS" = "true" ]; then
+          echo "Fixing: disablePipelines=true — patching to false"
+          oc patch $CFG -n $ODH_NS --type merge \
+            -p '{"spec":{"dashboardConfig":{"disablePipelines":false}}}'
+        else
+          echo "OK: disablePipelines is not true"
+        fi
+        echo "done"
+      store_as: dashboard_flag_status
+    post_check:
+      command: |
+        ODH_NS=$(oc get odhdashboardconfig --all-namespaces --no-headers -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || echo 'redhat-ods-applications')
+        DIS=$(oc get odhdashboardconfig -n $ODH_NS -o jsonpath='{.spec.dashboardConfig.disablePipelines}' 2>/dev/null)
+        [ "$DIS" != "true" ] && echo "ok" || echo "blocked"
+      expected: "ok"
+      timeout: "30s"
+      on_fail: STOP
+    on_fail_hint: >
+      Pipelines are blocked in dashboard config. Fix: patch odhdashboardconfig --type merge -p '{"spec":{"dashboardConfig":{"disablePipelines":false}}}'
+
 source_repos:
   - "https://github.com/opendatahub-io/data-science-pipelines-operator"
   - "https://github.com/opendatahub-io/data-science-pipelines"
   - "https://github.com/opendatahub-io/opendatahub-operator"
 
 known_bad_patterns:
+  - "never assume the component shows in the dashboard just because the DSC component is Managed — also check OdhDashboardConfig feature flags (disable* = false, tech preview = true)"
   - "never create a DSPA without an S3 bucket configured — the pipeline server will fail to start"
   - "never share one DSPA across multiple projects — each project must have its own"
   - "never use the same S3 bucket for multiple DSPA instances without different prefixes"

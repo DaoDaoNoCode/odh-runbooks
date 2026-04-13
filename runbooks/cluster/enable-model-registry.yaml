@@ -74,12 +74,49 @@ steps:
       Next step: Create a registry instance
         odh run model-registry/enable-registry -p registry_name=model-registry
 
+  - id: verify-dashboard-config
+    confidence: doc-derived
+    description: >
+      Verify OdhDashboardConfig shows Model Registry in the dashboard.
+      Checks disableModelRegistry — if true the registry section won't appear
+      even with the ModelRegistry operator running.
+    action:
+      type: query
+      command: |
+        ODH_NS=$(oc get odhdashboardconfig --all-namespaces --no-headers -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || echo 'redhat-ods-applications')
+        CFG=$(oc get odhdashboardconfig -n $ODH_NS -o name 2>/dev/null | head -1)
+        if [ -z "$CFG" ]; then
+          echo "ok: OdhDashboardConfig not found (older ODH version — skipping)"
+          exit 0
+        fi
+        DIS=$(oc get odhdashboardconfig -n $ODH_NS -o jsonpath='{.spec.dashboardConfig.disableModelRegistry}' 2>/dev/null)
+        if [ "$DIS" = "true" ]; then
+          echo "Fixing: disableModelRegistry=true — patching to false"
+          oc patch $CFG -n $ODH_NS --type merge \
+            -p '{"spec":{"dashboardConfig":{"disableModelRegistry":false}}}'
+        else
+          echo "OK: disableModelRegistry is not true"
+        fi
+        echo "done"
+      store_as: dashboard_flag_status
+    post_check:
+      command: |
+        ODH_NS=$(oc get odhdashboardconfig --all-namespaces --no-headers -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || echo 'redhat-ods-applications')
+        DIS=$(oc get odhdashboardconfig -n $ODH_NS -o jsonpath='{.spec.dashboardConfig.disableModelRegistry}' 2>/dev/null)
+        [ "$DIS" != "true" ] && echo "ok" || echo "blocked"
+      expected: "ok"
+      timeout: "30s"
+      on_fail: STOP
+    on_fail_hint: >
+      Model Registry blocked in dashboard config. Fix: patch odhdashboardconfig --type merge -p '{"spec":{"dashboardConfig":{"disableModelRegistry":false}}}'
+
 source_repos:
   - "https://github.com/opendatahub-io/model-registry-operator"
   - "https://github.com/kubeflow/model-registry"
   - "https://github.com/opendatahub-io/opendatahub-operator"
 
 known_bad_patterns:
+  - "never assume the component shows in the dashboard just because the DSC component is Managed — also check OdhDashboardConfig feature flags (disable* = false, tech preview = true)"
   - "never create ModelRegistry CRs before enabling the component — the operator won't be present"
   - "never delete the odh-model-registries namespace manually — it is managed by the operator"
 

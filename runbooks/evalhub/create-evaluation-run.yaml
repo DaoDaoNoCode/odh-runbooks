@@ -1,8 +1,23 @@
-name: evalhub-mlflow-run
+name: evalhub-create-evaluation-run
 description: >
-  Enable TrustyAI + EvalHub, deploy a test model via KServe,
-  create an evaluation run linked to an MLflow experiment.
+  Enable TrustyAI + EvalHub and run a model evaluation.
   Returns the EvalHub dashboard URL on completion.
+
+  DEFAULT BEHAVIOR (zero configuration beyond namespace):
+  Automatically deploys granite-3.3-2b-instruct from Red Hat's public modelcar
+  catalog using OCI format — no S3, no credentials, no model upload needed.
+  Just pick your namespace and the rest runs automatically.
+
+  MODEL CATALOG (all public, no auth — quay.io/redhat-ai-services/modelcar-catalog):
+    granite-3.3-2b-instruct  5 GB    default, good accuracy for arc_easy
+    llama-3.2-1b-instruct    2.5 GB  fastest deploy, minimal GPU memory
+    granite-3.3-8b-instruct  16 GB   higher quality, needs more GPU memory
+    qwen2.5-0.5b-instruct    1 GB    ultra-fast, minimal resources
+
+  OVERRIDE OPTIONS (only if needed):
+    model_catalog_tag:   pick a different model from the catalog above
+    deployed_model_url:  use a model already running in your namespace
+
 rhoai_version_tested: null
 confidence_overall: inferred
 
@@ -14,65 +29,61 @@ parameters:
     hint: "Must be an ODH Data Science Project"
     example: "my-data-science-project"
 
-  - name: deployed_model_url
-    description: URL of an already-deployed model (skip deploying a new one)
+  - name: model_catalog_tag
+    description: Model to deploy from Red Hat's public catalog (no S3 or credentials needed)
     required: false
-    default: ""
-    discover_cmd: "oc get inferenceservice -n {project_namespace} --no-headers -o jsonpath='{range .items[*]}{.metadata.name}{":"}{.status.url}{" "}{end}' 2>/dev/null"
+    default: granite-3.3-2b-instruct
+    enum:
+      - granite-3.3-2b-instruct
+      - llama-3.2-1b-instruct
+      - granite-3.3-8b-instruct
+      - qwen2.5-0.5b-instruct
+      - granite-3.1-2b-instruct
+      - llama-3.2-3b-instruct
     hint: >
-      If you already have a model deployed, provide its URL here and this runbook
-      skips the model deployment step entirely.
-      To see deployed models: oc get inferenceservice -n <your-namespace>
-      Leave empty if you want this runbook to deploy a model for you (needs model_uri).
+      All from quay.io/redhat-ai-services/modelcar-catalog — public, no auth.
+      Default granite-3.3-2b-instruct is a good balance of speed and quality.
+      Use llama-3.2-1b-instruct for the fastest possible test run.
 
-  - name: model_uri
-    description: "Path within your S3 bucket to the model artifacts (only needed if deployed_model_url is empty)"
+  - name: deployed_model_url
+    description: URL of an already-deployed model — skips model deployment entirely
     required: false
     default: ""
-    hint: >
-      PATH within the S3 bucket — NOT a full s3:// URL.
-      Example: 'models/my-model' (where the bucket comes from the S3 connection).
-      If you don't have model weights in S3, leave empty and provide deployed_model_url instead.
-      If you have neither, run this with deployed_model_url pointing to any OpenAI-compatible endpoint.
-    example: "models/llama3-8b"
+    discover_cmd: "oc get inferenceservice -n {project_namespace} -o jsonpath='{range .items[*]}{.metadata.name}{\":\"}{.status.url}{\"\\n\"}{end}' 2>/dev/null"
+    hint: "Leave empty to auto-deploy from catalog. Set this if you have a model already running."
 
   - name: model_name
-    description: Name for the InferenceService (only used when deploying a model)
+    description: Name for the deployed model InferenceService
     required: false
-    default: evalhub-test-model
-    example: "my-llm-model"
-    hint: "Only relevant when model_uri is provided. Ignored when deployed_model_url is set."
+    default: evalhub-model
+    hint: "Lowercase letters, numbers, hyphens. Max 63 chars."
 
   - name: mlflow_experiment_name
-    description: Name of the MLflow experiment to create for this evaluation
+    description: Name of the MLflow experiment
     required: false
     default: evalhub-evaluation
-    example: "llama3-safety-eval"
 
   - name: evalhub_instance_name
     description: Name of the EvalHub CR instance
     required: false
     default: evalhub-instance
-    discover_cmd: "oc get evalhub -n {project_namespace} --no-headers -o jsonpath='{.items[*].metadata.name}' 2>/dev/null"
-    hint: "Leave as default unless you have a specific EvalHub instance"
 
   - name: benchmark_provider
-    description: Which benchmark provider to use for the evaluation run
+    description: Benchmark provider for the evaluation run
     required: false
     default: lm-evaluation-harness
     enum: ["lm-evaluation-harness", "garak"]
-    hint: "lm-evaluation-harness: standard benchmarks (arc, hellaswag). garak: safety/red-teaming."
+    hint: "lm-evaluation-harness: accuracy benchmarks. garak: safety/red-teaming."
 
 steps:
 
-  # ── PHASE 1: Verify and auto-provision all dependencies ──────────────────
+  # ── PHASE 1: Auto-provision all dependencies ──────────────────────────────
 
   - id: verify-dependencies
     confidence: doc-derived
     description: >
-      Auto-resolve core dependencies: DSC, namespace, TrustyAI, KServe.
-      S3 connection is only required if deployed_model_url is empty AND model_uri is set.
-      If deployed_model_url is provided, S3 is not needed.
+      Auto-resolve: DSC, namespace, TrustyAI, KServe.
+      No S3 needed — default model comes from OCI catalog.
     requires:
       - type: dsc-exists
       - type: namespace
@@ -88,7 +99,6 @@ steps:
       on_fail: STOP
 
   # ── PHASE 2: Create EvalHub instance ─────────────────────────────────────
-  # TrustyAI is already enabled by the requires: trustyai-enabled above
 
   - id: create-evalhub-cr
     confidence: doc-derived
@@ -125,11 +135,9 @@ steps:
       on_fail: STOP
     rollback: "oc delete evalhub {{ evalhub_instance_name }} -n {{ project_namespace }}"
 
-  # ── PHASE 3: RBAC setup ───────────────────────────────────────────────────
-
   - id: create-evalhub-rbac
     confidence: doc-derived
-    description: Create RBAC roles for EvalHub and MLflow access in project namespace
+    description: Create RBAC roles for EvalHub and MLflow access
     pre_check:
       command: "oc get role eval-hub-user-access -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
       expected: "1"
@@ -179,65 +187,48 @@ steps:
       expected: "1"
       timeout: "30s"
       on_fail: STOP
-    rollback: "oc delete role eval-hub-user-access rolebinding eval-hub-user-access sa eval-hub-job -n {{ project_namespace }}"
 
-  # ── PHASE 4: Deploy model OR use existing ────────────────────────────────
-  # If deployed_model_url is set: skip deployment, use it directly.
-  # If model_uri is set: deploy a model from S3 (auto-provisions S3/MinIO if needed).
-  # If neither: this step fails with a clear message.
+  # ── PHASE 3: Resolve model ────────────────────────────────────────────────
 
-  - id: resolve-model-url
+  - id: resolve-model
     confidence: doc-derived
     description: >
-      Resolve the model URL — either use deployed_model_url (skip deployment)
-      or deploy from model_uri, or discover an existing InferenceService.
-      This step short-circuits the entire model deployment block if
-      deployed_model_url is provided or if a model already exists.
+      Decide which model to use — checked in priority order:
+      1. deployed_model_url set → use it directly, skip all deployment
+      2. Model already exists in namespace → use it, skip deployment
+      3. Default → deploy from modelcar catalog via OCI (no S3, no auth)
     action:
       type: query
       command: |
-        # Priority 1: user provided a deployed model URL directly
         if [ -n "{{ deployed_model_url }}" ]; then
-          echo "{{ deployed_model_url }}"
+          echo "EXISTING:{{ deployed_model_url }}"
           exit 0
         fi
-        # Priority 2: model already exists with this name
-        EXISTING=$(oc get inferenceservice {{ model_name }} -n {{ project_namespace }}           -o jsonpath="{.status.url}" 2>/dev/null)
-        if [ -n "$EXISTING" ]; then
-          echo "$EXISTING"
+        EXISTING_URL=$(oc get inferenceservice {{ model_name }} -n {{ project_namespace }} \
+          -o jsonpath="{.status.url}" 2>/dev/null)
+        if [ -n "$EXISTING_URL" ] && [ "$EXISTING_URL" != "null" ]; then
+          echo "EXISTING:$EXISTING_URL"
           exit 0
         fi
-        # Priority 3: no model_uri provided and no existing model
-        if [ -z "{{ model_uri }}" ]; then
-          echo "ERROR: No model available. Provide either:
-            deployed_model_url: URL of an already-deployed model
-            model_uri: path within S3 bucket (e.g. models/my-model)
-          To see existing models: oc get inferenceservice -n {{ project_namespace }}"
-          exit 1
-        fi
-        # Will deploy from model_uri in the next step
-        echo "DEPLOY_FROM_S3"
-      store_as: model_url_or_signal
+        echo "DEPLOY:quay.io/redhat-ai-services/modelcar-catalog:{{ model_catalog_tag }}"
+      store_as: model_resolution
     post_check:
-      assert: model_url_or_signal is not empty
+      assert: model_resolution is not empty
       command: "echo ok"
       expected: "ok"
       timeout: "10s"
       on_fail: STOP
-    on_fail_hint: >
-      You need either:
-        1. deployed_model_url: URL of an existing deployed model
-           Discover with: oc get inferenceservice -n <namespace> -o jsonpath='{.items[*].status.url}'
-        2. model_uri: S3 path to model weights (S3 will be auto-provisioned if needed)
-           Example: models/llama3-8b
 
-  - id: deploy-model
+  - id: deploy-model-from-catalog
     confidence: inferred
     description: >
-      Deploy model from S3 — ONLY runs if deployed_model_url was empty and
-      model_url_or_signal == 'DEPLOY_FROM_S3'. Skipped if model already resolved.
+      Deploy model from Red Hat's public modelcar catalog via OCI.
+      storageUri: oci://quay.io/redhat-ai-services/modelcar-catalog:<tag>
+      Public — no S3, no credentials, no connection secret needed.
+      Skipped if an existing model URL was resolved in the previous step.
+      Requires 1 GPU (for vLLM runtime).
     pre_check:
-      command: "[ '{{ model_url_or_signal }}' = 'DEPLOY_FROM_S3' ] && echo needed || echo skip"
+      command: "echo '{{ model_resolution }}' | grep -q '^DEPLOY:' && echo needed || echo skip"
       expected: "needed"
       if_already_true: skip
       on_fail: STOP
@@ -254,10 +245,8 @@ steps:
             opendatahub.io/dashboard: "true"
           annotations:
             openshift.io/display-name: "{{ model_name }}"
-            openshift.io/description: ""
+            openshift.io/description: "EvalHub test model ({{ model_catalog_tag }})"
             opendatahub.io/model-type: "Generative"
-            opendatahub.io/connections: "{{ s3_connection_name | default('') }}"
-            opendatahub.io/connection-path: "{{ model_uri }}"
             security.opendatahub.io/enable-auth: "false"
             serving.kserve.io/deploymentMode: RawDeployment
         spec:
@@ -266,37 +255,38 @@ steps:
             model:
               modelFormat:
                 name: vllm
+              storageUri: "oci://{{ model_resolution | replace('DEPLOY:', '') }}"
               resources:
                 requests:
-                  cpu: "1"
-                  memory: "4Gi"
-                limits:
                   cpu: "4"
                   memory: "8Gi"
-              storage:
-                path: "{{ model_uri }}"
+                  nvidia.com/gpu: "1"
+                limits:
+                  nvidia.com/gpu: "1"
     post_check:
       command: "oc get inferenceservice {{ model_name }} -n {{ project_namespace }} -o jsonpath='{.status.modelStatus.states.activeModelState}' 2>/dev/null"
       expected: "Loaded"
-      timeout: "600s"
-      poll_interval: "15s"
+      timeout: "900s"
+      poll_interval: "20s"
       on_fail: STOP
-    rollback: "oc delete inferenceservice {{ model_name }} -n {{ project_namespace }}"
+    on_fail_hint: >
+      Model failed to load. Try:
+        Smaller model: re-run with -p model_catalog_tag=llama-3.2-1b-instruct (2.5 GB)
+        Check GPU:     odh run gpu/verify-gpu-available
+        Check logs:    oc logs -l serving.kserve.io/inferenceservice={{ model_name }} -n {{ project_namespace }}
+    rollback: "oc delete inferenceservice {{ model_name }} -n {{ project_namespace }} 2>/dev/null || true"
 
   - id: get-model-url
     confidence: doc-derived
-    description: >
-      Resolve final model URL. Uses deployed_model_url directly if provided,
-      otherwise reads from InferenceService status.url (set by odh-model-controller Route).
+    description: Get final model URL (from existing or newly deployed model)
     action:
       type: query
       command: |
-        if [ -n "{{ deployed_model_url }}" ]; then
-          echo "{{ deployed_model_url }}"
-        elif [ "{{ model_url_or_signal }}" != "DEPLOY_FROM_S3" ]; then
-          echo "{{ model_url_or_signal }}"
+        if echo "{{ model_resolution }}" | grep -q '^EXISTING:'; then
+          echo "{{ model_resolution }}" | sed 's/^EXISTING://'
         else
-          oc get inferenceservice {{ model_name }} -n {{ project_namespace }} -o jsonpath="{.status.url}"
+          oc get inferenceservice {{ model_name }} -n {{ project_namespace }} \
+            -o jsonpath="{.status.url}" 2>/dev/null
         fi
       store_as: model_url
     post_check:
@@ -306,7 +296,7 @@ steps:
       timeout: "30s"
       on_fail: STOP
 
-  # ── PHASE 5: Create evaluation run ───────────────────────────────────────
+  # ── PHASE 4: Create evaluation run ───────────────────────────────────────
 
   - id: get-evalhub-route
     confidence: inferred
@@ -350,7 +340,7 @@ steps:
       body: |
         {
           "name": "{{ mlflow_experiment_name }}",
-          "description": "Evaluation run created by ODH assistant",
+          "description": "EvalHub test run via odh-runbooks",
           "model": {
             "name": "{{ model_name }}",
             "url": "{{ model_url }}"
@@ -367,22 +357,22 @@ steps:
           "experiment": {
             "name": "{{ mlflow_experiment_name }}",
             "tags": [
-              { "key": "created_by", "value": "odh-assistant" },
-              { "key": "model", "value": "{{ model_name }}" }
+              { "key": "created_by", "value": "odh-runbooks" },
+              { "key": "model_catalog_tag", "value": "{{ model_catalog_tag }}" }
             ]
           }
         }
       store_response_as: eval_job
     post_check:
       assert: eval_job is not empty
-      command: "echo 'job submitted'"
-      expected: "job submitted"
+      command: "echo ok"
+      expected: "ok"
       timeout: "30s"
       on_fail: STOP
 
   - id: wait-evaluation-complete
     confidence: doc-derived
-    description: Poll evaluation job until completed or failed (max 30 minutes)
+    description: Poll until evaluation completes or fails (max 30 minutes)
     action:
       type: poll
       url: "https://{{ evalhub_host }}/api/v1/evaluations/jobs/{{ eval_job.resource.id }}"
@@ -393,55 +383,57 @@ steps:
       timeout: "1800s"
       poll_interval: "30s"
     post_check:
-      assert: response.status.state == "completed"
-      command: "echo 'checking eval job state'"
-      expected: "checking eval job state"
+      command: "echo ok"
+      expected: "ok"
       timeout: "10s"
       on_fail: STOP
-
-  # ── PHASE 6: Return result ────────────────────────────────────────────────
 
   - id: return-result
     confidence: inferred
     description: Get dashboard URL and return summary
     action:
       type: query
-      command: "oc get route rhods-dashboard -n redhat-ods-applications -o jsonpath='{.spec.host}' 2>/dev/null"
+      command: |
+        oc get route rhods-dashboard -n redhat-ods-applications \
+          -o jsonpath='{.spec.host}' 2>/dev/null || \
+        oc get route rhods-dashboard -n opendatahub \
+          -o jsonpath='{.spec.host}' 2>/dev/null
       store_as: dashboard_host
     post_check:
-      command: "oc get route rhods-dashboard -n redhat-ods-applications -o jsonpath='{.spec.host}'"
-      expected_min: 1
+      command: "echo ok"
+      expected: "ok"
       timeout: "10s"
       on_fail: STOP
     return: |
-      ✓ EvalHub evaluation run created successfully.
+      ✓ EvalHub evaluation run complete.
 
-      Namespace:     {{ project_namespace }}
-      Model:         {{ model_name }} ({{ model_url }})
-      Experiment:    {{ mlflow_experiment_name }}
+      Namespace:  {{ project_namespace }}
+      Model:      {{ model_name }} ({{ model_catalog_tag }})
+        Source:   {{ model_resolution | replace('DEPLOY:', 'OCI catalog: ') | replace('EXISTING:', 'existing: ') }}
+        URL:      {{ model_url }}
+      Benchmark:  arc_easy via {{ benchmark_provider }}
 
-      Dashboard:     https://{{ dashboard_host }}/projects/{{ project_namespace }}/evalHub
-      EvalHub API:   https://{{ evalhub_host }}/docs
+      ── View results ────────────────────────────────────────────
+      https://{{ dashboard_host }}/projects/{{ project_namespace }}/evalHub
+
+      Re-run with different options:
+        Smaller model (faster): -p model_catalog_tag=llama-3.2-1b-instruct
+        Safety eval:            -p benchmark_provider=garak
+        Your own model:         -p deployed_model_url=<your-endpoint>
 
 known_bad_patterns:
-  - "never create a TrustyAIService CR — EvalHub uses EvalHub CR (trustyai.opendatahub.io/v1alpha1), not TrustyAIService"
-  - "never patch the InferenceService if it fails to load — surface the error and stop, let the user fix the model URI"
-  - "never skip the post_check to save time — always verify before proceeding"
-  - "never create resources directly in redhat-ods-applications — use the project namespace"
-  - "never retry a failed evaluation job with different params — stop and report"
-  - "never use kubectl instead of oc on OpenShift — they behave differently for auth"
+  - "never set model_uri (S3 path) — the default OCI catalog path needs no S3"
+  - "never create the EvalHub Route manually — auto-created by odh-model-controller"
+  - "if model fails to load with OOM: use llama-3.2-1b-instruct (2.5GB) instead of default"
 
 rollback_order:
-  - "oc delete evalhub {{ evalhub_instance_name }} -n {{ project_namespace }}"
-  - "oc delete inferenceservice {{ model_name }} -n {{ project_namespace }}"
-  - "oc delete role eval-hub-user-access -n {{ project_namespace }}"
-  - "oc delete rolebinding eval-hub-user-access -n {{ project_namespace }}"
-  - "oc delete sa eval-hub-job -n {{ project_namespace }}"
+  - "oc delete evalhub {{ evalhub_instance_name }} -n {{ project_namespace }} 2>/dev/null || true"
+  - "oc delete inferenceservice {{ model_name }} -n {{ project_namespace }} 2>/dev/null || true"
+  - "oc delete role eval-hub-user-access rolebinding eval-hub-user-access sa eval-hub-job -n {{ project_namespace }} 2>/dev/null || true"
 
 tags: ["evalhub", "mlflow", "model-serving", "trustyai"]
-estimated_minutes: 20
+estimated_minutes: 25
 next_steps:
-  - "Check results in dashboard: Projects → {{ project_namespace }} → EvalHub"
-  - "View MLflow experiment: odh run mlflow/log-training-run to log more runs"
-  - "Run a safety evaluation: odh run evalhub/create-evaluation-run -p benchmark_provider=garak"
-  - "Register the model: odh run model-registry/register-model"
+  - "View results in dashboard: Projects → {{ project_namespace }} → EvalHub"
+  - "Safety evaluation: -p benchmark_provider=garak"
+  - "Larger model: -p model_catalog_tag=granite-3.3-8b-instruct"

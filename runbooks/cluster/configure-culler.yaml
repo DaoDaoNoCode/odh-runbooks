@@ -4,6 +4,17 @@ description: >
   The culler stops idle notebooks after a configurable timeout to save resources.
   Configured via the OdhDashboardConfig CR in redhat-ods-applications namespace.
   Dashboard: Cluster settings → Stop idle notebooks.
+
+  OPERATOR BEHAVIOR (opendatahub-operator):
+  The 'notebook-controller-culler-config' ConfigMap is created by the operator
+  for the workbenches component. By default it has no 'opendatahub.io/managed'
+  annotation, meaning the operator creates it once but does NOT continuously
+  reconcile it — your changes persist across operator reconcile cycles.
+  EXCEPTION: If the operator does a full component reinstall (e.g. DSC update
+  changes workbenches managementState), the ConfigMap may be recreated with
+  defaults. If that happens, apply this annotation to prevent overwrite:
+    oc annotate configmap notebook-controller-culler-config \
+      -n redhat-ods-applications opendatahub.io/managed=false
 rhoai_version_tested: null
 confidence_overall: inferred
 

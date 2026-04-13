@@ -4,6 +4,50 @@ Thank you for contributing! The most valuable contributions are **new runbooks**
 
 ---
 
+## Understanding the opendatahub-operator (read this first)
+
+The opendatahub-operator manages ALL ODH/RHOAI components via the `DataScienceCluster` (DSC) CRD.
+Understanding it prevents creating resources that conflict with or duplicate operator behavior.
+
+### The `opendatahub.io/managed` annotation
+
+| Annotation | Effect |
+|---|---|
+| absent (default) | Operator creates resource once, does NOT continuously reconcile — your changes persist |
+| `"false"` | Same as absent — operator created it but you can modify freely |
+| `"true"` | Operator reconciles continuously — any manual change is overwritten |
+
+**When you enable a component** (e.g. `kserve.managementState: Managed`), the operator creates
+ALL child resources automatically: Deployments, Services, ConfigMaps, CRDs, RBAC, Routes.
+**Do not create these manually** — the operator handles everything.
+
+**To customize an operator-created resource** (e.g. add env vars to a Deployment):
+1. Edit it directly — changes persist because resources are `managed: absent` by default
+2. If the operator overwrites your changes (e.g. after a DSC update), protect the resource:
+   ```bash
+   oc annotate <resource-type> <name> -n <namespace> opendatahub.io/managed=false --overwrite
+   ```
+3. Do NOT manually add `opendatahub.io/managed: true` — this makes the operator overwrite forever
+
+**Kueue queues**: The operator creates default `ClusterQueue` and `LocalQueue` (both named `default`)
+with `opendatahub.io/managed: false`. Runbooks that create project-specific queues with different
+names do not conflict with these.
+
+**The correct runbook pattern for enabling components**:
+```yaml
+# CORRECT: patch the DSC — operator does everything else
+- id: enable-component
+  action:
+    type: patch
+    target: "$(oc get dsc -o name | head -1)"
+    patch: '{"spec":{"components":{"kserve":{"managementState":"Managed"}}}}'
+
+# WRONG: manually creating what the operator would create
+- id: create-kserve-deployment   # ← never do this
+```
+
+---
+
 ## The fastest contribution: fix a runbook
 
 If you run a runbook and something doesn't work — wrong CRD version, missing annotation, wrong field name — please fix it and open a PR. These fixes are the most valuable thing you can contribute because they represent real cluster knowledge.

@@ -4,6 +4,16 @@ description: >
   Creates a RayCluster, submits a RayJob, monitors until completion.
   Requires CodeFlare + Ray to be enabled (run cluster/enable-codeflare first).
   Kueue ResourceFlavor and ClusterQueue must exist for job queuing.
+
+  OPERATOR-CREATED DEFAULT QUEUES (opendatahub-operator):
+  When Kueue is enabled via DSC, the operator creates default queues:
+    ClusterQueue: 'default' (cluster-wide)
+    LocalQueue: 'default' (per-namespace, created with opendatahub.io/managed=false)
+  This runbook creates PROJECT-SPECIFIC queues with different names
+  ('{{ project_namespace }}-queue', 'local-queue') — no conflict with operator defaults.
+  If you prefer to use the operator-created 'default' queues, skip the
+  create-resource-flavor/create-cluster-queue/create-local-queue steps and
+  set queue-name: local to 'default' in the RayJob spec.
 rhoai_version_tested: null
 confidence_overall: inferred
 

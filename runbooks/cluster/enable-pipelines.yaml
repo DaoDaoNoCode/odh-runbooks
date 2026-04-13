@@ -3,6 +3,16 @@ description: >
   Enable Data Science Pipelines (DSP) in the DataScienceCluster.
   DSP uses Kubeflow Pipelines + Argo Workflows, deployed per-project namespace
   for tenant isolation. After enabling, users create a pipeline server per project.
+  HOW THE OPERATOR WORKS (opendatahub-operator):
+  Patching managementState to 'Managed' in DSC is the ONLY action needed here.
+  The opendatahub-operator automatically creates ALL child resources:
+  Deployments, Services, ConfigMaps, CRDs, RBAC, Routes — everything.
+  Do NOT manually create any of these — the operator manages them.
+  Resources in the ODH namespace are created with opendatahub.io/managed absent
+  (create-once behavior) unless explicitly marked managed=true (operator overwrites).
+  To customize an operator-created resource: edit it directly — changes persist
+  since resources are not continuously reconciled by default.
+  Source: github.com/opendatahub-io/opendatahub-operator
 rhoai_version_tested: null
 confidence_overall: doc-derived
 

@@ -4,6 +4,14 @@ description: >
   Covers: notebook culling, default PVC size, model serving platform, telemetry.
   These settings appear in the dashboard under Admin → Cluster Settings.
   Backend: GET/PUT /api/cluster-settings via ODH dashboard backend.
+
+  OPERATOR BEHAVIOR (opendatahub-operator):
+  ConfigMaps patched here (notebook-controller-culler-config, odh-segment-key-config)
+  and the OdhDashboardConfig CR are created by the operator. By default, the operator
+  uses create-once behavior (no 'opendatahub.io/managed: true' annotation), so your
+  changes persist. If they're overwritten after a DSC reconcile, protect them with:
+    oc annotate configmap notebook-controller-culler-config \
+      -n <odh-namespace> opendatahub.io/managed=false --overwrite
 rhoai_version_tested: null
 confidence_overall: doc-derived
 

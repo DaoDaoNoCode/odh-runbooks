@@ -121,7 +121,11 @@ steps:
       timeout: "15s"
       on_fail: STOP
 
-  # ── PHASE 2: Create EvalHub instance ─────────────────────────────────────
+  # ── PHASE 2: Verify EvalHub cluster service ──────────────────────────────
+  # EvalHub is a SHARED cluster-level service installed by the TrustyAI operator
+  # in the ODH namespace (redhat-ods-applications / opendatahub).
+  # Do NOT create per-namespace EvalHub CRs — the BFF always routes to the ODH namespace.
+  # Jobs are scoped to user namespaces via X-Tenant header, not by namespace of the CR.
 
   - id: detect-mlflow-tracking-uri
     confidence: doc-derived
@@ -146,45 +150,49 @@ steps:
       timeout: "10s"
       on_fail: STOP
 
-  - id: create-evalhub-cr
+  - id: verify-evalhub-cluster-service
     confidence: doc-derived
-    description: Create EvalHub CR in the project namespace
-    pre_check:
-      command: "oc get evalhub {{ evalhub_instance_name }} -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
-      expected: "1"
-      if_already_true: skip
-      on_fail: STOP
+    description: >
+      Verify the shared EvalHub service is running in the ODH namespace.
+      EvalHub is a CLUSTER-LEVEL shared service — the TrustyAI operator installs
+      a single EvalHub in the ODH namespace (redhat-ods-applications or opendatahub).
+      The dashboard BFF ALWAYS routes to this shared service, never to per-namespace CRs.
+      Jobs are scoped to namespaces via X-Tenant header, not by EvalHub location.
+      Do NOT create EvalHub CRs in user namespaces — they will be ignored by the BFF.
     action:
-      type: create
-      dry_run: true
-      manifest: |
-        apiVersion: trustyai.opendatahub.io/v1alpha1
-        kind: EvalHub
-        metadata:
-          name: {{ evalhub_instance_name }}
-          namespace: {{ project_namespace }}
-          labels:
-            opendatahub.io/dashboard: "true"
-        spec:
-          replicas: 1
-          providers:
-            - lm-evaluation-harness
-            - garak
-          collections:
-            - leaderboard-v2
-            - safety-and-fairness-v1
-          database:
-            type: sqlite
-          env:
-            - name: MLFLOW_TRACKING_URI
-              value: "{{ mlflow_tracking_uri }}"
+      type: query
+      command: |
+        for ns in redhat-ods-applications opendatahub; do
+          URL=$(oc get evalhub -n $ns -o jsonpath='{.items[0].status.url}' 2>/dev/null)
+          if [ -n "$URL" ]; then
+            NAME=$(oc get evalhub -n $ns -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+            echo "Found EvalHub: $NAME in $ns"
+            echo "URL: $URL"
+            echo "evalhub_ns=$ns"
+            echo "evalhub_name=$NAME"
+            exit 0
+          fi
+        done
+        echo "ERROR: No EvalHub found in redhat-ods-applications or opendatahub"
+        echo "Ask your cluster admin to enable TrustyAI/EvalHub via the DSC"
+      store_as: evalhub_cluster_info
     post_check:
-      command: "oc get evalhub {{ evalhub_instance_name }} -n {{ project_namespace }} -o jsonpath='{.status.phase}' 2>/dev/null"
-      expected: "Ready"
-      timeout: "300s"
-      poll_interval: "10s"
+      command: |
+        for ns in redhat-ods-applications opendatahub; do
+          if oc get evalhub -n $ns --no-headers 2>/dev/null | grep -q Ready; then
+            echo "ok"; exit 0
+          fi
+        done
+        echo "not-found"
+      expected: "ok"
+      timeout: "30s"
       on_fail: STOP
-    rollback: "oc delete evalhub {{ evalhub_instance_name }} -n {{ project_namespace }}"
+    on_fail_hint: >
+      No ready EvalHub found in the ODH namespace. The TrustyAI operator installs
+      EvalHub when trustyai.managementState=Managed in the DataScienceCluster.
+      Check: oc get dsc -o jsonpath='{.items[0].spec.components.trustyai}'
+      Enable: oc patch dsc ... --type merge -p '{"spec":{"components":{"trustyai":{"managementState":"Managed"}}}}'
+      Then wait for the EvalHub to appear: oc get evalhub -n redhat-ods-applications
 
   - id: wait-evalhub-url
     confidence: doc-derived
@@ -674,17 +682,34 @@ steps:
       on_fail: STOP
 
   - id: get-evalhub-route
-    confidence: inferred
-    description: Get the EvalHub service route
+    confidence: doc-derived
+    description: >
+      Get the shared EvalHub service route from the ODH namespace.
+      The EvalHub route is in redhat-ods-applications (or opendatahub), not in the
+      user's project namespace. Jobs submitted to this route are scoped to the
+      user's namespace via X-Tenant header.
     action:
       type: query
-      command: "oc get route {{ evalhub_instance_name }} -n {{ project_namespace }} -o jsonpath='{.spec.host}' 2>/dev/null"
+      command: |
+        for ns in redhat-ods-applications opendatahub; do
+          HOST=$(oc get route -n $ns --no-headers 2>/dev/null | grep "^evalhub " | awk '{print $2}' | head -1)
+          if [ -n "$HOST" ]; then
+            echo "$HOST"
+            exit 0
+          fi
+        done
+        echo ""
       store_as: evalhub_host
     post_check:
       assert: evalhub_host is not empty
-      command: "oc get route {{ evalhub_instance_name }} -n {{ project_namespace }} -o jsonpath='{.spec.host}'"
+      command: |
+        for ns in redhat-ods-applications opendatahub; do
+          HOST=$(oc get route -n $ns --no-headers 2>/dev/null | grep "^evalhub " | awk '{print $2}' | head -1)
+          [ -n "$HOST" ] && echo "$HOST" && exit 0
+        done
+        echo ""
       expected_min: 1
-      timeout: "60s"
+      timeout: "30s"
       on_fail: STOP
 
   - id: get-cluster-token

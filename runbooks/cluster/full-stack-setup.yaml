@@ -53,7 +53,7 @@ steps:
       target: "$(oc get dsc -o name | head -1)"
       patch: >
         {"spec":{"components":{
-          "kserve":{"managementState":"Managed","serving":{"managementState":"Managed","ingressGateway":{"certificate":{"type":"SelfSigned"}}}},
+          "kserve":{"managementState":"Managed","rawDeploymentServiceConfig":"Headed"},
           "datasciencepipelines":{"managementState":"Managed"},
           "modelregistry":{"managementState":"Managed","registriesNamespace":"odh-model-registries"},
           "trustyai":{"managementState":"Managed","eval":{"lmeval":{"permitCodeExecution":"allow","permitOnline":"allow"}}},

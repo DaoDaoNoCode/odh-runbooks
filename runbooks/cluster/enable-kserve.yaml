@@ -4,14 +4,15 @@ description: >
   Standard mode uses Kubernetes Deployments/Services/Routes without Serverless/Knative.
   This is the correct mode for RHOAI without Service Mesh or Serverless operators.
 
-  DSC configuration applied (from docs: RHOAIENG-24906):
-    defaultDeploymentMode: RawDeployment  — all InferenceServices use Raw by default
-    rawDeploymentServiceConfig: Headed    — normal K8s load balancing over replicas
-    serving.managementState: Removed      — Knative Serving disabled (not needed)
+  DSC configuration (source of truth: opendatahub-operator kserve_types.go):
+    managementState: Managed              — enables KServe
+    rawDeploymentServiceConfig: Headed   — Headed=normal K8s load balancing (ServiceClusterIPNone=false)
+                                           Headless=direct pod addressing (ServiceClusterIPNone=true, default)
 
-  DSCI requirement: serviceMesh.managementState should be Removed for Standard mode.
-  If you need Advanced mode (scale-to-zero via Knative): set serving.managementState: Managed
-  and install Red Hat Serverless and Service Mesh operators first.
+  Fields that do NOT exist (ignore if seen in older docs):
+    defaultDeploymentMode — RawDeployment is the ONLY supported mode, no field to select it
+    serving.managementState — not a real DSC field
+    serviceMesh configuration — not configurable via DSC/DSCI
 
   BUILT-IN ServingRuntimes provided by RHOAI (do not create manually):
     GPU: "vLLM NVIDIA GPU ServingRuntime for KServe"   — reference by name in InferenceService
@@ -68,10 +69,10 @@ steps:
       patch: >
         {"spec":{"components":{"kserve":{
           "managementState":"Managed",
-          "defaultDeploymentMode":"RawDeployment",
-          "rawDeploymentServiceConfig":"Headed",
-          "serving":{"managementState":"Removed","name":"knative-serving"}
+          "rawDeploymentServiceConfig":"Headed"
         }}}}
+      # SOURCE: opendatahub-operator kserve_types.go
+      # Valid fields: managementState (Managed|Removed), rawDeploymentServiceConfig (Headed|Headless)
       dry_run: false
     post_check:
       command: "oc get dsc -o jsonpath='{.items[0].spec.components.kserve.managementState}'"

@@ -393,59 +393,77 @@ oc get dsci -o jsonpath='{.items[0].status.conditions}' | python3 -m json.tool
 # This is automatic when DSCI is healthy — rarely needs manual intervention
 ```
 
-### Layer 4 — Module federation (EvalHub and other packages)
+### Layer 4 — Module federation (two different patterns)
 
-EvalHub (and MLflow, GenAI, Model Registry, AutoML, etc.) use **webpack module federation**
-— their UIs run as **sidecar containers inside the same dashboard pod**, proxied via `/_mf/{name}`.
+The `federation-config` ConfigMap in the ODH namespace is the source of truth for all federated modules.
+The dashboard reads it as `MODULE_FEDERATION_CONFIG` env var. But the modules themselves run in two different ways:
 
-**Architecture** (from `manifests/modular-architecture/`):
-- `federation-config` ConfigMap in the ODH namespace — contains JSON array of all module configs
-- Dashboard reads it as `MODULE_FEDERATION_CONFIG` env var
-- Each module is a sidecar container (e.g., `eval-hub-ui` on port 8543) in the dashboard pod
-- The `odh-dashboard` Service exposes port 8543 as `eval-hub-ui`
-- Dashboard backend proxies `/_mf/evalHub/*` → the sidecar on port 8543
+**Pattern A — Sidecar in dashboard pod (EvalHub, GenAI, Model Registry, MaaS, AutoML, AutoRAG)**
 
-**Who creates these?** The `modular-architecture` kustomize overlay applied at **dashboard install time**.
-NOT created by the TrustyAI operator or any component operator — it's part of the dashboard deployment.
+These run as sidecar containers inside the same dashboard pod, added by the `modular-architecture` kustomize overlay at dashboard install time.
 
-**4a — `federation-config` ConfigMap** (dashboard install artefact)
+| Module | Sidecar name | Port | federation-config service target |
+|---|---|---|---|
+| EvalHub | `eval-hub-ui` | 8543 | `odh-dashboard:8543` |
+| GenAI | `gen-ai-ui` | 8143 | `odh-dashboard:8143` |
+| Model Registry | `model-registry-ui` | 8043 | `odh-dashboard:8043` |
+| MLflow (new pkg) | `mlflow-ui` | 8343 | `odh-dashboard:8343` |
 
+Check:
 ```bash
 ODH_NS=redhat-ods-applications  # or opendatahub
 
-# Check it exists and has evalHub
-oc get configmap federation-config -n $ODH_NS 2>/dev/null && echo "exists" || echo "MISSING"
+# federation-config ConfigMap (must exist — dashboard install artefact)
+oc get configmap federation-config -n $ODH_NS -o jsonpath='{.data.module-federation-config\.json}' \
+  | python3 -m json.tool | grep '"name"'
 
-# Check evalHub is in the config
-oc get configmap federation-config -n $ODH_NS \
-  -o jsonpath='{.data.module-federation-config\.json}' \
-  | python3 -m json.tool | grep -A5 '"evalHub"'
-```
-
-If missing: the `modular-architecture` overlay was not applied at install. Dashboard installation issue, not TrustyAI.
-
-**4b — `eval-hub-ui` sidecar container in the dashboard pod**
-
-```bash
-# Check the sidecar is in the deployment spec
+# sidecar containers in dashboard pod
 oc get deployment -n $ODH_NS -l app=rhods-dashboard \
-  -o jsonpath='{.items[0].spec.template.spec.containers[*].name}' | tr ' ' '\n' | grep eval
-
-# Check the running pod has the container
-oc get pod -n $ODH_NS -l app=rhods-dashboard \
-  -o jsonpath='{.items[0].status.containerStatuses[*].name}' | tr ' ' '\n' | grep eval
-
-# End-to-end: does /_mf/evalHub respond?
-DASH_POD=$(oc get pod -n $ODH_NS -l app=rhods-dashboard -o name | head -1)
-oc exec $DASH_POD -n $ODH_NS -c rhods-dashboard -- \
-  curl -sk -o /dev/null -w "%{http_code}" https://localhost:8543/healthcheck
-# 200 = sidecar running, connection refused = sidecar not started
+  -o jsonpath='{.items[0].spec.template.spec.containers[*].name}' | tr ' ' '\n'
 ```
 
-**Symptom map:**
-- `/evaluation` returns **404** → `federation-config` missing evalHub or `eval-hub-ui` sidecar not running
-- `/evaluation` shows **blank page** → sidecar running but EvalHub backend (from CR) not ready
-- `/evaluation` shows **content** but no runs → everything working, just no eval job submitted yet
+If `federation-config` or sidecars are missing: the `modular-architecture` overlay was not applied at dashboard install. Dashboard installation issue, not a component operator issue.
+
+**Pattern B — Separate pod from a component operator (MLflow via mlflow-operator)**
+
+MLflow is served from a **separate pod** created by the **mlflow-operator** — not a sidecar.
+The federation-config entry `mlflowEmbedded` points directly to this pod's service:
+
+```json
+{
+  "name": "mlflowEmbedded",
+  "remoteEntry": "/mlflow/static-files/federated/remoteEntry.js",
+  "service": { "name": "mlflow", "namespace": "opendatahub", "port": 8443 }
+}
+```
+
+The `mlflow` service is created by the mlflow-operator when the MLflow CR (which MUST be named `mlflow`) reaches Ready. The MLflow server pod serves the federated UI at `/mlflow/static-files/federated/remoteEntry.js` (hardcoded `staticPrefix=/mlflow` in the operator).
+
+Check:
+```bash
+# Is the mlflow service running?
+oc get service mlflow -n $ODH_NS
+
+# Is the pod ready?
+oc get pod -l app=mlflow -n $ODH_NS
+
+# Does the federated UI respond?
+MLFLOW_POD=$(oc get pod -l app=mlflow -n $ODH_NS -o name | head -1)
+oc exec $MLFLOW_POD -n $ODH_NS -- curl -sk -o /dev/null -w "%{http_code}" \
+  https://localhost:8443/mlflow/static-files/federated/remoteEntry.js
+# 200 = working
+```
+
+**Symptom maps:**
+
+EvalHub (`/evaluation`):
+- **404** → `federation-config` missing `evalHub` or `eval-hub-ui` sidecar not running (dashboard install)
+- **blank page** → sidecar running but EvalHub CR backend not ready yet
+- **content, no runs** → everything working, no eval job submitted
+
+MLflow (`/develop-train/mlflow`):
+- **404 / blank** → `mlflow` service not running (mlflow-operator hasn't created it yet — check MLflow CR)
+- **loads but API fails** → `mlflow: true` flag not set in OdhDashboardConfig
 
 ---
 

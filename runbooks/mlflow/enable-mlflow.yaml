@@ -152,6 +152,72 @@ steps:
       poll_interval: "15s"
       on_fail: STOP
 
+  - id: verify-mlflow-federation-service
+    confidence: doc-derived
+    description: >
+      Verify the MLflow service is reachable for module federation.
+
+      Unlike EvalHub (which runs as a sidecar inside the dashboard pod), MLflow runs
+      as a SEPARATE POD created by the mlflow-operator. The dashboard's federation-config
+      has a hardcoded 'mlflowEmbedded' entry pointing to:
+        service.name: "mlflow", namespace: <odh-ns>, port: 8443
+
+      The MLflow server serves the federated UI at:
+        https://<mlflow-service>:8443/mlflow/static-files/federated/remoteEntry.js
+
+      The CR MUST be named 'mlflow' (enforced by the operator). This creates a service
+      also named 'mlflow' in the ODH namespace, which matches federation-config exactly.
+    action:
+      type: query
+      command: |
+        ODH_NS={{ odh_namespace }}
+
+        # Check mlflow service exists (created by mlflow-operator when MLflow CR is Ready)
+        echo "=== MLflow service (separate pod, NOT a sidecar) ==="
+        if oc get service mlflow -n $ODH_NS 2>/dev/null | grep -q mlflow; then
+          echo "OK: mlflow service exists in $ODH_NS"
+          oc get service mlflow -n $ODH_NS --no-headers
+        else
+          echo "WARNING: mlflow service not found in $ODH_NS"
+          echo "  The mlflow-operator creates this service when the MLflow CR reaches Ready."
+          echo "  Check: oc get mlflow mlflow"
+        fi
+
+        # Check federation-config has mlflowEmbedded pointing to this service
+        echo ""
+        echo "=== federation-config mlflowEmbedded entry ==="
+        if oc get configmap federation-config -n $ODH_NS 2>/dev/null | grep -q federation-config; then
+          ENTRY=$(oc get configmap federation-config -n $ODH_NS \
+            -o jsonpath='{.data.module-federation-config\.json}' 2>/dev/null | \
+            python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+for m in d:
+    if m.get('name')=='mlflowEmbedded':
+        print('OK: mlflowEmbedded entry found')
+        print('  service:', m.get('service',{}))
+        print('  remoteEntry:', m.get('remoteEntry',''))
+" 2>/dev/null)
+          echo "${ENTRY:-(not found in federation-config)}"
+        else
+          echo "WARNING: federation-config ConfigMap not found"
+        fi
+
+        echo "done"
+      store_as: mlflow_federation_status
+    post_check:
+      command: "oc get service mlflow -n {{ odh_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "30s"
+      on_fail: STOP
+    on_fail_hint: >
+      The 'mlflow' service was not found in the ODH namespace.
+      This service is created by the mlflow-operator when the MLflow CR is Ready.
+      Check: oc get mlflow mlflow -o jsonpath='{.status}'
+      The MLflow CR must be named 'mlflow' (enforced by operator validation).
+      If the CR exists but service is missing, check operator logs:
+      oc logs -n {{ odh_namespace }} -l control-plane=controller-manager --tail=20
+
   - id: grant-sdk-access
     confidence: doc-derived
     description: >
@@ -260,7 +326,7 @@ steps:
         if [ "$CURRENT" != "true" ]; then
           echo "Enabling mlflow tech preview flag..."
           oc patch $CFG -n $ODH_NS --type merge \
-            -p '{"spec":{"dashboardConfig":{{"mlflow":true}}}}'
+            -p '{"spec":{"dashboardConfig":{"mlflow":true}}}'
           echo "Patched: mlflow=true"
         else
           echo "Already enabled: mlflow=true"
@@ -280,6 +346,7 @@ steps:
       Could not enable mlflow tech preview flag in OdhDashboardConfig. Manual fix: oc patch $(oc get odhdashboardconfig -n redhat-ods-applications -o name | head -1) -n redhat-ods-applications --type merge -p '{"spec":{"dashboardConfig":{"mlflow":true}}}'
 
 source_repos:
+  - "https://github.com/opendatahub-io/mlflow-operator"
   - "https://github.com/mlflow/mlflow"
   - "https://github.com/opendatahub-io/opendatahub-operator"
   - "https://github.com/opendatahub-io/odh-dashboard"

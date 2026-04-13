@@ -395,24 +395,54 @@ oc get dsci -o jsonpath='{.items[0].status.conditions}' | python3 -m json.tool
 
 ### Layer 4 — Module federation (EvalHub only)
 
-EvalHub is a **federated module** — the dashboard loads its UI from a separate service at runtime
-via webpack module federation (`/_mf/evalHub/remoteEntry.js`). The TrustyAI operator deploys
-this service when an EvalHub CR reaches Ready status.
+EvalHub uses **webpack module federation** — its UI is loaded at runtime from a separate service
+at `/_mf/evalHub/remoteEntry.js`. There are two sub-checks here:
+
+**4a — `MODULE_FEDERATION_CONFIG` env var on the dashboard Deployment**
+
+This env var is set by the **opendatahub-operator** (not a ConfigMap — no ConfigMap to check).
+It contains a JSON array telling the dashboard backend which services to proxy for each module.
+Without the `evalHub` entry, the `/_mf/evalHub` proxy is never registered → the route 404s.
 
 ```bash
-# Check the module federation service exists and is running
+ODH_NS=redhat-ods-applications  # or opendatahub
+
+# Check if evalHub is registered
+oc get deployment -n $ODH_NS -l app=rhods-dashboard -o name | head -1 | \
+  xargs -I{} oc get {} -n $ODH_NS \
+    -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="MODULE_FEDERATION_CONFIG")].value}' \
+  | python3 -m json.tool | grep -i eval
+# Should show an entry with name: evalHub or similar
+
+# If evalHub is missing — trigger DSC reconciliation (operator re-sets the env var):
+oc annotate $(oc get dsc -o name | head -1) reconcile=$(date +%s) --overwrite
+# Then wait for dashboard pod to restart with the updated env var
+```
+
+This env var is **operator-managed** — never set it manually, the operator will overwrite it.
+
+**4b — EvalHub module federation service in the project namespace**
+
+The TrustyAI operator deploys this service when the EvalHub CR reaches `Ready`. It's the
+actual server that responds to `/_mf/evalHub/remoteEntry.js` requests.
+
+```bash
+# Check the service is running
 oc get pods -n <project-ns> | grep -iE "evalhub|eval-hub|lmeval"
 oc get service -n <project-ns> | grep -iE "evalhub|eval-hub|lmeval"
 
-# Test the dashboard can reach it (from the dashboard pod)
+# End-to-end test: dashboard proxy → EvalHub service
 DASH_POD=$(oc get pod -n $ODH_NS -l app=rhods-dashboard -o name | head -1)
 oc exec $DASH_POD -n $ODH_NS -- curl -s -o /dev/null -w "%{http_code}" \
   http://localhost:8080/_mf/evalHub/remoteEntry.js
-# Should return 200; returns 503 if the EvalHub service is not running
+# 200 = working, 404 = MODULE_FEDERATION_CONFIG missing evalHub,
+# 503 = evalHub service not running
 ```
 
-If the EvalHub page shows blank (no error, just empty): the module federation service is not up yet.
-Wait for the EvalHub CR to fully reconcile: `oc get evalhub -n <ns> -o jsonpath='{.status.phase}'`
+**Symptom map:**
+- `/evaluation` returns **404** → `MODULE_FEDERATION_CONFIG` missing evalHub (check operator reconciliation)
+- `/evaluation` shows **blank page** → evalHub service not running (check EvalHub CR phase)
+- `/evaluation` shows **content** but no runs → EvalHub CR Ready but no eval job created yet
 
 ---
 

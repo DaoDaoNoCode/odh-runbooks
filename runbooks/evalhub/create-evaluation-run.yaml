@@ -138,12 +138,19 @@ steps:
   - id: verify-evalhub-dashboard-visibility
     confidence: doc-derived
     description: >
-      Verify EvalHub will appear in the dashboard. Two layers beyond DSC:
-      1. OdhDashboardConfig.disableLMEval must be false (dashboard feature flag gate)
-      2. Module federation: the operator deploys an EvalHub module federation service
-         that the dashboard proxies via /_mf/evalHub. Without it the /evaluation
-         route shows blank even if the EvalHub CR is Ready.
-      Auto-fixes the dashboard config flag if blocked.
+      Verify EvalHub will appear in the dashboard. Three layers beyond DSC:
+
+      1. OdhDashboardConfig.disableLMEval must be false (feature flag gate).
+         Auto-fixes if blocked.
+
+      2. MODULE_FEDERATION_CONFIG env var on the dashboard Deployment must include
+         the evalHub entry. This is set by the opendatahub-operator when TrustyAI
+         is enabled in DSC. Without it the /_mf/evalHub proxy is never registered
+         and the /evaluation route returns 404.
+         Read-only check — managed by the operator, cannot be manually set.
+
+      3. EvalHub module federation service must be running in the namespace.
+         Deployed by TrustyAI operator when EvalHub CR reaches Ready.
     action:
       type: query
       command: |
@@ -151,29 +158,53 @@ steps:
           -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || echo 'redhat-ods-applications')
         CFG=$(oc get odhdashboardconfig -n $ODH_NS -o name 2>/dev/null | head -1)
 
-        # Layer 2: OdhDashboardConfig flag
+        # --- Layer 2: OdhDashboardConfig flag ---
         if [ -n "$CFG" ]; then
           DIS=$(oc get odhdashboardconfig -n $ODH_NS \
             -o jsonpath='{.spec.dashboardConfig.disableLMEval}' 2>/dev/null)
           if [ "$DIS" = "true" ]; then
-            echo "Fixing: disableLMEval=true"
+            echo "Fixing: disableLMEval=true — patching to false"
             oc patch $CFG -n $ODH_NS --type merge \
               -p '{"spec":{"dashboardConfig":{"disableLMEval":false}}}'
           else
-            echo "OK: disableLMEval not disabled"
+            echo "OK: disableLMEval is not blocked"
           fi
         fi
 
-        # Layer 4: Module federation service
-        echo "=== EvalHub pods (module federation) ==="
+        # --- Layer 4a: MODULE_FEDERATION_CONFIG env var ---
+        # The opendatahub-operator sets this on the dashboard Deployment.
+        # It tells the dashboard backend which services to proxy for each federated module.
+        echo ""
+        echo "=== Dashboard MODULE_FEDERATION_CONFIG ==="
+        DASH_DEPLOY=$(oc get deployment -n $ODH_NS -l app=rhods-dashboard -o name 2>/dev/null | head -1)
+        if [ -n "$DASH_DEPLOY" ]; then
+          MF_CONFIG=$(oc get $DASH_DEPLOY -n $ODH_NS \
+            -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="MODULE_FEDERATION_CONFIG")].value}' \
+            2>/dev/null)
+          if echo "$MF_CONFIG" | python3 -m json.tool 2>/dev/null | grep -qi "evalhub\|eval-hub\|lmeval"; then
+            echo "OK: evalHub is registered in MODULE_FEDERATION_CONFIG"
+          elif [ -n "$MF_CONFIG" ]; then
+            echo "WARNING: evalHub NOT in MODULE_FEDERATION_CONFIG — registered modules:"
+            echo "$MF_CONFIG" | python3 -c "import json,sys; d=json.load(sys.stdin); [print('  -',m.get('name','?')) for m in d]" 2>/dev/null || echo "$MF_CONFIG" | head -3
+            echo "The opendatahub-operator will set this when DSC reconciles."
+            echo "Trigger: oc patch $(oc get dsc -o name | head -1) --type merge -p '{"spec":{}}'"
+          else
+            echo "WARNING: MODULE_FEDERATION_CONFIG env var is empty or not set"
+            echo "The opendatahub-operator sets this — check DSC reconciliation status"
+          fi
+        else
+          echo "WARNING: dashboard deployment not found in $ODH_NS"
+        fi
+
+        # --- Layer 4b: EvalHub module federation service ---
+        echo ""
+        echo "=== EvalHub service/pods (module federation server) ==="
         oc get pods -n {{ project_namespace }} --no-headers 2>/dev/null | \
           grep -iE "evalhub|eval-hub|lmeval" || \
-          echo "(none yet — operator reconciles this after EvalHub CR is Ready)"
-
-        echo "=== EvalHub service ==="
+          echo "(none yet — TrustyAI operator deploys this when EvalHub CR reaches Ready)"
         oc get service -n {{ project_namespace }} --no-headers 2>/dev/null | \
-          grep -iE "evalhub|eval-hub|lmeval" || \
-          echo "(none yet)"
+          grep -iE "evalhub|eval-hub|lmeval" || true
+
         echo "done"
       store_as: evalhub_visibility_status
     post_check:
@@ -187,13 +218,15 @@ steps:
       timeout: "30s"
       on_fail: STOP
     on_fail_hint: >
-      EvalHub blocked by OdhDashboardConfig.disableLMEval=true.
-      Fix: oc patch $(oc get odhdashboardconfig -n redhat-ods-applications -o name | head -1)
-      -n redhat-ods-applications --type merge
-      -p {"spec":{"dashboardConfig":{"disableLMEval":false}}}
-      If page is blank: EvalHub module federation service not running.
-      Check: oc get pods -n {{ project_namespace }} | grep -i evalhub
-      The TrustyAI operator deploys this when EvalHub CR reaches Ready.
+      If disableLMEval=true: patch OdhDashboardConfig to false (auto-fixed above).
+      If /evaluation is blank (no error): MODULE_FEDERATION_CONFIG is missing evalHub.
+        The opendatahub-operator sets this — re-touch DSC to trigger reconciliation:
+        oc annotate $(oc get dsc -o name | head -1) reconcile=$(date +%s) --overwrite
+        Then wait for the dashboard pod to restart with the updated env var.
+      If evalHub is in MODULE_FEDERATION_CONFIG but page still blank:
+        EvalHub module federation service not running yet — check EvalHub CR phase:
+        oc get evalhub {{ evalhub_instance_name }} -n {{ project_namespace }} -o jsonpath='{.status.phase}'
+        Wait for Ready, then the service should appear.
 
   - id: create-evalhub-rbac
     confidence: doc-derived

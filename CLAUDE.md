@@ -492,17 +492,29 @@ oc get nodes -l nvidia.com/gpu.present=true --no-headers || echo "(no GPU nodes)
 **If CPU/memory insufficient:** use a smaller model or reduce resource requests.
 Check: `oc describe nodes | grep -A 5 "Allocated resources"`
 
-### ImagePullBackOff / ErrImagePull — terminal, never self-heals
+### ImagePullBackOff / ErrImagePull — check WHICH image before deciding
+
 ```bash
-oc get pod -l serving.kserve.io/inferenceservice=<model> -n <ns> \
-  -o jsonpath='{.items[0].status.containerStatuses[*].state.waiting.reason}'
-# Also check init containers:
-  -o jsonpath='{.items[0].status.initContainerStatuses[*].state.waiting.reason}'
+# Find the failing image
+oc describe pod -l serving.kserve.io/inferenceservice=<model> -n <ns> | grep "Failed to pull image"
 ```
 
-Stop immediately — retrying the same image URI will not fix an image pull error.
-Check the OCI URI in the InferenceService manifest. Verify registry is accessible.
-`oc describe pod -l serving.kserve.io/inferenceservice=<model> -n <ns> | grep "Failed to pull"`
+**Two different situations — different responses:**
+
+**1. Subscription-gated image** (`quay.io/rhoai/`, `registry.redhat.io/rh*`):
+Not terminal — fixable. These are RHOAI-subscription images. The standard fix is to use
+the public CPU runtime image instead: `quay.io/rh-aiservices-bu/vllm-cpu-openai-ubi9:0.3`
+
+```bash
+# Delete the runtime that uses the subscription image
+oc delete servingruntime <runtime-name> -n <ns>
+oc delete inferenceservice <model> -n <ns>
+# Recreate ServingRuntime with the public image, then redeploy the InferenceService
+```
+
+**2. Public registry image with wrong URI** (`quay.io/rh-aiservices-bu/`, `quay.io/redhat-ai-services/`):
+Truly terminal if the URI is wrong — retrying won't help.
+Verify the image reference and fix the URI.
 
 ### CrashLoopBackOff / OOMKilled — check logs, attempt one standard fix
 

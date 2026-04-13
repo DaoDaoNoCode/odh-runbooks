@@ -173,8 +173,13 @@ steps:
 
       2. IMAGEPULLBACKOFF / ErrImagePull — the image cannot be pulled.
          Detected from: pod containerStatuses[].state.waiting.reason.
-         This is a terminal condition — retrying will not fix it.
-         Stop immediately and fix the image URI or registry access.
+         IMPORTANT: Not always terminal — check WHICH image is failing:
+         - quay.io/rhoai/* or registry.redhat.io/rh* → subscription-gated RHOAI image.
+           Standard fix: delete ServingRuntime + InferenceService, recreate with the
+           public CPU alternative: quay.io/rh-aiservices-bu/vllm-cpu-openai-ubi9:0.3
+           This is the documented non-subscription CPU runtime approach.
+         - Public registry image (quay.io/rh-aiservices-bu, quay.io/redhat-ai-services, etc.)
+           → truly terminal if URI is wrong. Verify the image reference and stop.
 
       3. CRASHLOOPBACKOFF / OOMKilled — container started but is crashing.
          Detected from: containerStatuses[].state.waiting.reason + lastState.terminated.reason.
@@ -229,9 +234,21 @@ steps:
           2>/dev/null | tr ' ' '\n' | grep -iE "ImagePullBackOff|ErrImagePull" | head -1)
         if [ -n "$IMG_ERR" ]; then
           echo "IMAGE PULL ERROR: $IMG_ERR"
-          oc describe pod "$POD_NAME" -n {{ project_namespace }} 2>/dev/null | \
-            grep -E "Failed to pull|Error.*image|Back-off pulling" | head -5
-          echo "terminal-imagepull"
+          # Extract the failing image name — critical for deciding if it's fixable
+          FAIL_IMG=$(oc describe pod "$POD_NAME" -n {{ project_namespace }} 2>/dev/null | \
+            grep -E "Failed to pull image" | head -3)
+          echo "$FAIL_IMG"
+          # Check if it's a subscription-gated image (quay.io/rhoai/ or registry.redhat.io/)
+          if echo "$FAIL_IMG" | grep -qE "quay\.io/rhoai/|registry\.redhat\.io/rh"; then
+            echo ""
+            echo "SUBSCRIPTION IMAGE: This image requires RHOAI subscription credentials."
+            echo "Standard fix: delete this ServingRuntime and recreate with the public CPU image."
+            echo "  Public alternative: quay.io/rh-aiservices-bu/vllm-cpu-openai-ubi9:0.3"
+            echo "  This is the documented approach in RHOAI devtools for CPU-only clusters."
+            echo "image-pull-subscription"
+          else
+            echo "terminal-imagepull"
+          fi
           exit 0
         fi
 
@@ -289,9 +306,34 @@ steps:
           Use a small model: qwen2.5-0.5b-instruct (1 GB, needs ~6 Gi memory, ~4 CPU)
         CPU/memory insufficient: use a smaller model or reduce resource requests.
         Check resources: oc describe nodes | grep -A 5 "Allocated resources"
-      IMAGEPULLBACKOFF — terminal, will never self-heal:
-        Verify the OCI URI is correct and the registry is accessible.
-        oc describe pod -l serving.kserve.io/inferenceservice={{ model_name }} -n {{ project_namespace }} | grep -A3 "Failed to pull"
+      IMAGEPULLBACKOFF — two cases:
+        1. Subscription image (quay.io/rhoai/ or registry.redhat.io/rh*):
+           Not terminal — fixable with the public CPU alternative.
+           Standard fix:
+             oc delete servingruntime vllm-cpu-runtime -n {{ project_namespace }} 2>/dev/null || true
+             oc delete inferenceservice {{ model_name }} -n {{ project_namespace }} 2>/dev/null || true
+           Then recreate with the public image by applying this ServingRuntime:
+             apiVersion: serving.kserve.io/v1alpha1
+             kind: ServingRuntime
+             metadata:
+               name: vllm-cpu-runtime
+               namespace: {{ project_namespace }}
+             spec:
+               multiModel: false
+               supportedModelFormats:
+                 - name: vLLM
+                   autoSelect: true
+               containers:
+                 - name: kserve-container
+                   image: quay.io/rh-aiservices-bu/vllm-cpu-openai-ubi9:0.3
+                   ports:
+                     - containerPort: 8080
+                   resources:
+                     requests: {cpu: "4", memory: "6Gi"}
+                     limits: {memory: "8Gi"}
+           Then redeploy the InferenceService referencing this runtime.
+        2. Public image with wrong URI: verify the OCI URI is correct.
+           oc describe pod -l serving.kserve.io/inferenceservice={{ model_name }} -n {{ project_namespace }} | grep "Failed to pull"
       CRASHLOOPBACKOFF / OOMKILLED — check logs and apply one standard fix:
         oc logs -l serving.kserve.io/inferenceservice={{ model_name }} -n {{ project_namespace }} --tail=60
         OOMKilled fix: patch the InferenceService args to add --max-model-len=4096

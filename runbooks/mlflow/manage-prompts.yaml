@@ -129,6 +129,10 @@ steps:
             )
       ────────────────────────────────────────────────────────
 
+source_repos:
+  - "https://github.com/mlflow/mlflow"
+  - "https://github.com/opendatahub-io/odh-dashboard"
+
 known_bad_patterns:
   - "never hardcode prompt text in application code — always load from registry to enable versioning"
   - "never put API keys or secrets in prompt templates — use environment variables instead"

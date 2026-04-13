@@ -123,6 +123,12 @@ steps:
       Next step: Register a model
         odh run model-registry/register-model -p registry_name={{ registry_name }}
 
+source_repos:
+  - "https://github.com/opendatahub-io/model-registry-operator"
+  - "https://github.com/kubeflow/model-registry"
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+  - "https://github.com/opendatahub-io/odh-dashboard"
+
 known_bad_patterns:
   - "CRITICAL: API version must be v1beta1 — using v1alpha1 will fail as the CRD is v1beta1"
   - "CRITICAL: registry must be in odh-model-registries namespace — dashboard hardcodes this namespace for discovery"

@@ -90,6 +90,9 @@ steps:
       You can now safely delete the cluster:
         rosa delete cluster -c <cluster-name>
 
+source_repos:
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+
 known_bad_patterns:
   - "CRITICAL: never skip this runbook before rosa delete cluster — Bug ACM-12961 will cause deletion to hang"
   - "never delete just the ClusterPolicies without deleting Kyverno itself — the webhooks remain active and still interfere"

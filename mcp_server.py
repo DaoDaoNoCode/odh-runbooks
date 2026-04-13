@@ -30,7 +30,6 @@ PROJECT_DIR = Path(__file__).parent
 sys.path.insert(0, str(PROJECT_DIR))
 
 from runner.cluster import ClusterClient
-from runner.executor import RunbookExecutor, RunMode
 from runner.schema import Runbook
 from runner.resolver import DEPENDENCY_REGISTRY
 from runner.dependency_map import DEPENDENCY_CHAINS
@@ -44,25 +43,28 @@ RUNBOOKS_DIR = PROJECT_DIR / "runbooks"
 mcp = FastMCP(
     "ODH Runbooks",
     instructions="""
-    You are an ODH/RHOAI platform assistant with access to a runbook executor.
-    You can set up ODH components, check cluster state, and explain how things work.
+    You are an ODH/RHOAI platform assistant with access to an agentic runbook executor.
+    Claude executes each runbook with full judgment — checking cluster state, consulting
+    source repos for the correct approach, and adapting to the actual environment.
 
     Key capabilities:
     - list_runbooks: see all available runbooks
     - check_cluster: diagnose what's installed, what's missing
-    - check_dependencies: preview what a runbook will auto-provision
-    - run_runbook: execute a runbook (plan, qa, or implement mode)
-    - ask_odh: answer ODH architecture/config questions
+    - check_dependencies: preview what a runbook needs
+    - run_runbook: execute a runbook (dry_run=True to preview, False to execute)
+    - show_runbook: see the steps without executing
+    - search_runbooks: find runbooks by keyword
 
-    Always ask the user for confirmation before running in 'implement' mode
-    when it will make significant changes (enabling components, deploying models).
-    For read-only checks (qa mode) or plan previews, proceed without asking.
+    For significant changes (enabling components, deploying models), always:
+    1. First call run_runbook with dry_run=True to show what will happen
+    2. Ask the user to confirm
+    3. Then call run_runbook with dry_run=False to execute
 
     When a user says something like:
-    - "set up EvalHub" → use run_runbook with evalhub/create-evaluation-run
-    - "check if pipelines work" → use run_runbook with qa mode
-    - "what's installed?" → use check_cluster
-    - "what will happen if I run X?" → use check_dependencies, then run_runbook in plan mode
+    - "set up EvalHub" → check_dependencies then run_runbook('evalhub/create-evaluation-run', ...)
+    - "deploy a vLLM model" → run_runbook('model-serving/deploy-vllm-model', ...)
+    - "what's installed?" → check_cluster
+    - "what will happen if I run X?" → run_runbook(dry_run=True) to preview
     """,
 )
 
@@ -74,12 +76,11 @@ def _capture_run(coro) -> str:
     buf = io.StringIO()
     cap = Console(file=buf, width=100)
 
-    # Monkey-patch the module-level console temporarily
-    import runner.executor as exec_mod
+    import runner.agentic as ag_mod
     import runner.resolver as res_mod
-    orig_exec = exec_mod.console
+    orig_ag = ag_mod.console
     orig_res = res_mod.console
-    exec_mod.console = cap
+    ag_mod.console = cap
     res_mod.console = cap
 
     try:
@@ -87,7 +88,7 @@ def _capture_run(coro) -> str:
     except Exception as e:
         cap.print(f"[red]Error: {e}[/red]")
     finally:
-        exec_mod.console = orig_exec
+        ag_mod.console = orig_ag
         res_mod.console = orig_res
 
     return buf.getvalue()
@@ -327,24 +328,25 @@ def check_dependencies(runbook_name: str, params: dict = {}) -> str:
 def run_runbook(
     runbook_name: str,
     params: dict = {},
-    mode: str = "implement",
+    dry_run: bool = False,
 ) -> str:
     """
-    Execute an ODH runbook.
+    Execute an ODH runbook using Claude's judgment (agentic mode).
+
+    Claude reads the runbook as a reference, checks cluster state, consults
+    the component's source repos when unsure, and executes with judgment.
 
     Args:
         runbook_name: Runbook path e.g. 'evalhub/create-evaluation-run',
                       'pipelines/create-pipeline-server', 'cluster/full-stack-setup'
-        params: Dictionary of parameters the runbook needs.
-                Example: {'project_namespace': 'my-project', 'model_uri': 's3://...'}
-        mode: Execution mode:
-              - 'plan'      → Preview what would happen (no changes, safe)
-              - 'qa'        → Read-only state check (is everything in place?)
-              - 'implement' → Execute for real (makes changes to cluster)
+        params: Parameters the runbook needs.
+                Example: {'project_namespace': 'my-project'}
+        dry_run: If True, Claude reviews cluster state and reports what would happen
+                 but makes no changes. Good for previewing before committing.
 
     Returns the execution output including any errors and the final result.
 
-    IMPORTANT: Always run 'plan' mode first for new runbooks, then 'implement'.
+    TIP: Use dry_run=True first to see what will happen, then dry_run=False to execute.
     """
     try:
         runbook, _ = _load_runbook(runbook_name)
@@ -368,40 +370,37 @@ def run_runbook(
             + "\n".join(f"  - {p.name}: {p.description}" for p in runbook.parameters if p.required)
         )
 
-    run_mode = {"plan": RunMode.PLAN, "qa": RunMode.QA, "implement": RunMode.IMPLEMENT}.get(
-        mode.lower(), RunMode.IMPLEMENT
-    )
-
+    from runner.agentic import run_agentic
     cluster = _make_cluster()
-    executor = RunbookExecutor(runbook, full_params, cluster, mode=run_mode)
 
     buf = io.StringIO()
     cap = Console(file=buf, width=100, highlight=False)
 
-    import runner.executor as exec_mod
+    import runner.agentic as ag_mod
     import runner.resolver as res_mod
-    orig_exec = exec_mod.console
+    orig_ag = ag_mod.console
     orig_res = res_mod.console
-    exec_mod.console = cap
+    ag_mod.console = cap
     res_mod.console = cap
 
     success = False
     try:
-        success = asyncio.run(executor.run())
+        success = asyncio.run(
+            run_agentic(runbook, full_params, cluster, runbook_path=runbook_name, dry_run=dry_run)
+        )
     except Exception as e:
         cap.print(f"[red]Unexpected error: {e}[/red]")
     finally:
-        exec_mod.console = orig_exec
+        ag_mod.console = orig_ag
         res_mod.console = orig_res
 
     output = buf.getvalue()
-
-    # Strip ANSI escape codes for cleaner Claude output
     import re
     output = re.sub(r'\x1b\[[0-9;]*[mK]', '', output)
 
+    mode_str = "dry-run (review only)" if dry_run else "agentic (executed)"
     status = "✓ SUCCESS" if success else "✗ FAILED/STOPPED"
-    return f"**Mode: {mode} | Status: {status}**\n\n```\n{output}\n```"
+    return f"**Mode: {mode_str} | Status: {status}**\n\n```\n{output}\n```"
 
 
 @mcp.tool

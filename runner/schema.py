@@ -107,6 +107,9 @@ class Runbook(BaseModel):
     known_bad_patterns: list[str] = []
     rollback_order: list[str] = []
     # UX guidance fields
-    tags: list[str] = []                # e.g. ["setup", "gpu", "beginner"]
-    estimated_minutes: Optional[int] = None   # Total time estimate for the whole runbook
-    next_steps: list[str] = []          # Suggested runbooks/commands to run after this one
+    tags: list[str] = []
+    estimated_minutes: Optional[int] = None
+    next_steps: list[str] = []
+    # Agentic recovery: source repos Claude checks when a step fails
+    # Claude fetches these to find the STANDARD fix, not a workaround
+    source_repos: list[str] = []        # e.g. ["https://github.com/opendatahub-io/trustyai-explainability"]

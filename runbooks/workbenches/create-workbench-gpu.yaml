@@ -213,6 +213,12 @@ steps:
 
       Dashboard: Projects → {{ project_namespace }} → Workbenches → {{ workbench_name }} → Open
 
+source_repos:
+  - "https://github.com/opendatahub-io/notebooks"
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+  - "https://github.com/opendatahub-io/odh-dashboard"
+  - "https://github.com/NVIDIA/gpu-operator"
+
 known_bad_patterns:
   - "never request GPUs without the nvidia.com/gpu toleration — the pod will be pending forever"
   - "never use a non-CUDA image with GPU requests — the GPU will be allocated but unusable"

@@ -106,6 +106,10 @@ steps:
         - Pipeline server artifact storage (s3CredentialsSecret references AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY by key name)
         - Model deployment storage (storage.key field)
 
+source_repos:
+  - "https://github.com/opendatahub-io/odh-dashboard"
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+
 known_bad_patterns:
   - "CRITICAL: the dashboard requires BOTH opendatahub.io/dashboard=true AND opendatahub.io/managed=true — missing either label means the connection won't appear"
   - "never use a different data key naming — DSPA references AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY by exact key name in its spec"

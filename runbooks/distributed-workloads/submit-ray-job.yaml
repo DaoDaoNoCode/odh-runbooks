@@ -231,6 +231,14 @@ steps:
 
       Dashboard: Distributed Workloads section in ODH dashboard
 
+source_repos:
+  - "https://github.com/project-codeflare/codeflare-operator"
+  - "https://github.com/project-codeflare/codeflare-sdk"
+  - "https://github.com/ray-project/ray"
+  - "https://github.com/kubernetes-sigs/kueue"
+  - "https://github.com/project-codeflare/appwrapper"
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+
 known_bad_patterns:
   - "never submit a RayJob without Kueue queues configured — the job will be stuck in Pending"
   - "never use a Ray version that doesn't match the Ray image version — workers will fail to join the cluster"

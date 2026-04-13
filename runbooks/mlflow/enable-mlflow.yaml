@@ -239,6 +239,11 @@ steps:
         - Dashboard: click MLflow tile in RHOAI dashboard if enabled
       ──────────────────────────────────────────────────────────────
 
+source_repos:
+  - "https://github.com/mlflow/mlflow"
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+  - "https://github.com/opendatahub-io/odh-dashboard"
+
 known_bad_patterns:
   - "CRITICAL: never deploy MLflow as a standalone Deployment — use the MLflow Operator CR (apiVersion: mlflow.opendatahub.io/v1 Kind: MLflow)"
   - "CRITICAL: the MLflow CR is cluster-scoped — never put it in a namespace, never create multiple MLflow CRs"

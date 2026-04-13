@@ -73,6 +73,11 @@ steps:
 
       Next step: odh run pipelines/create-pipeline-server -p project_namespace=<ns> -p ...
 
+source_repos:
+  - "https://github.com/opendatahub-io/data-science-pipelines-operator"
+  - "https://github.com/opendatahub-io/data-science-pipelines"
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+
 known_bad_patterns:
   - "never create a DSPA without an S3 bucket configured — the pipeline server will fail to start"
   - "never share one DSPA across multiple projects — each project must have its own"

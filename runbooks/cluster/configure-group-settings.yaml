@@ -104,6 +104,10 @@ steps:
           -p admin_groups="cluster-admins,ml-admins" \
           -p allowed_groups="ml-team,system:authenticated"
 
+source_repos:
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+  - "https://github.com/opendatahub-io/odh-dashboard"
+
 known_bad_patterns:
   - "never remove system:authenticated from allowed_groups unless you want to block all users"
   - "never add individual users instead of groups — use OpenShift groups for scalable access control"

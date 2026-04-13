@@ -354,7 +354,7 @@ class DependencyResolver:
         return DependencyResult(satisfied=True)
 
     async def _run_resolver(self, dep: dict, req: Requirement, resolver_path: str) -> bool:
-        from .executor import RunbookExecutor
+        from .agentic import run_agentic
 
         yaml_path = RUNBOOKS_DIR / f"{resolver_path}.yaml"
         if not yaml_path.exists():
@@ -371,5 +371,4 @@ class DependencyResolver:
             if param.name not in resolver_params and param.default is not None:
                 resolver_params[param.name] = param.default
 
-        executor = RunbookExecutor(runbook, resolver_params, self.cluster)
-        return await executor.run()
+        return await run_agentic(runbook, resolver_params, self.cluster, runbook_path=resolver_path)

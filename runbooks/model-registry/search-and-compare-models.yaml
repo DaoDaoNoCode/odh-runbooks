@@ -151,6 +151,11 @@ steps:
         Body: {"state": "ARCHIVED"}
       ────────────────────────────────────────────────────────
 
+source_repos:
+  - "https://github.com/opendatahub-io/model-registry-operator"
+  - "https://github.com/kubeflow/model-registry"
+  - "https://github.com/opendatahub-io/odh-dashboard"
+
 known_bad_patterns:
   - "never delete a registered model that has deployed InferenceServices — the deployment loses its registry link"
   - "never use GET without pageSize — large registries will time out"

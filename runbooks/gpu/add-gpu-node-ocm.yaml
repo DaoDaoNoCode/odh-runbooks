@@ -116,6 +116,10 @@ steps:
       Next step: Install GPU Operator
         odh run gpu/install-gpu-operator
 
+source_repos:
+  - "https://github.com/NVIDIA/gpu-operator"
+  - "https://github.com/openshift/rosa"
+
 known_bad_patterns:
   - "never use this runbook for self-managed OpenShift — use oc create machineset instead (different API)"
   - "never create a GPU machinepool without the nvidia.com/gpu=:NoSchedule taint — non-GPU workloads will be scheduled on expensive GPU nodes"

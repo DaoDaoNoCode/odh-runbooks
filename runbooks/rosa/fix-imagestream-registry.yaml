@@ -61,16 +61,9 @@ steps:
         echo ""
         oc get is -n {{ namespace }} --no-headers 2>/dev/null | awk '{print $1}' | while read IS_NAME; do
           BAD_TAGS=$(oc get is "$IS_NAME" -n {{ namespace }} -o json 2>/dev/null | \
-            python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-tags = data.get('spec', {}).get('tags', [])
-bad = [(t.get('name'), t.get('from', {}).get('name', '')) for t in tags
-       if t.get('from', {}).get('kind') == 'DockerImage'
-       and 'registry.redhat.io' in t.get('from', {}).get('name', '')]
-for name, img in bad:
-    print(f'  tag {name}: {img[:80]}...' if len(img) > 80 else f'  tag {name}: {img}')
-" 2>/dev/null)
+            jq -r '.spec.tags // [] | .[] | select(.from.kind == "DockerImage") |
+            select(.from.name | contains("registry.redhat.io")) |
+            "  tag \(.name): \(.from.name)"' 2>/dev/null)
           if [ -n "$BAD_TAGS" ]; then
             echo "✗ $IS_NAME:"
             echo "$BAD_TAGS"
@@ -94,61 +87,28 @@ for name, img in bad:
     action:
       type: query
       command: |
-        # Find the isfix tool
-        ISFIX_SCRIPT=""
-        for search_path in \
-          ~/Desktop/ODH/devtools/RHOAI-on-ROSA/install-rhoai/tools/isfix/is_registry_fix.py \
-          ~/repos/devtools/RHOAI-on-ROSA/install-rhoai/tools/isfix/is_registry_fix.py \
-          ./tools/isfix/is_registry_fix.py; do
-          if [ -f "$search_path" ]; then
-            ISFIX_SCRIPT="$search_path"
-            break
+        # Fix ImageStreams: replace registry.redhat.io tags with quay.io equivalents.
+        # For each ImageStream, find DockerImage tags pointing to registry.redhat.io
+        # and patch them to quay.io, then trigger import-image.
+        echo "Fixing ImageStreams in {{ namespace }}..."
+        oc get is -n {{ namespace }} --no-headers 2>/dev/null | awk '{print $1}' | while read IS_NAME; do
+          TAGS=$(oc get is "$IS_NAME" -n {{ namespace }} -o json 2>/dev/null | \
+            jq -r '.spec.tags // [] | to_entries[] | select(.value.from.kind == "DockerImage") |
+            select(.value.from.name | contains("registry.redhat.io")) |
+            "\(.key) \(.value.name) \(.value.from.name)"' 2>/dev/null || true)
+          if [ -n "$TAGS" ]; then
+            echo "$TAGS" | while IFS=' ' read IDX TAG_NAME OLD_IMG; do
+              NEW_IMG=$(echo "$OLD_IMG" | sed 's|registry.redhat.io/|quay.io/|g')
+              echo "  Patching $IS_NAME:$TAG_NAME: $OLD_IMG -> $NEW_IMG"
+              if [ "{{ dry_run }}" != "true" ]; then
+                oc patch is "$IS_NAME" -n {{ namespace }} --type=json \
+                  -p "[{\"op\":\"replace\",\"path\":\"/spec/tags/$IDX/from/name\",\"value\":\"$NEW_IMG\"}]" 2>&1 || true
+                oc import-image "$IS_NAME:$TAG_NAME" -n {{ namespace }} --confirm 2>/dev/null || true
+              fi
+            done
           fi
         done
-
-        DRY_RUN_FLAG=""
-        if [ "{{ dry_run }}" = "true" ]; then
-          DRY_RUN_FLAG="--dry-run"
-        fi
-
-        if [ -n "$ISFIX_SCRIPT" ]; then
-          echo "Found isfix tool at: $ISFIX_SCRIPT"
-          if [ -z "{{ imagestream_names }}" ]; then
-            # Fix all ImageStreams with problematic tags
-            oc get is -n {{ namespace }} --no-headers 2>/dev/null | awk '{print $1}' | \
-              xargs -I{} python3 "$ISFIX_SCRIPT" {} -n {{ namespace }} -y $DRY_RUN_FLAG 2>&1 || true
-          else
-            python3 "$ISFIX_SCRIPT" {{ imagestream_names }} -n {{ namespace }} -y $DRY_RUN_FLAG 2>&1 || true
-          fi
-        else
-          echo "isfix tool not found locally. Using inline fix..."
-          # Inline fix: patch all registry.redhat.io tags to quay.io
-          oc get is -n {{ namespace }} --no-headers 2>/dev/null | awk '{print $1}' | while read IS_NAME; do
-            oc get is "$IS_NAME" -n {{ namespace }} -o json 2>/dev/null | python3 -c "
-import json, sys, subprocess
-data = json.load(sys.stdin)
-tags = data.get('spec', {}).get('tags', [])
-for tag in tags:
-    img = tag.get('from', {}).get('name', '')
-    tag_name = tag.get('name', '')
-    if tag.get('from', {}).get('kind') == 'DockerImage' and 'registry.redhat.io' in img:
-        new_img = img.replace('registry.redhat.io/', 'quay.io/')
-        is_name = data['metadata']['name']
-        ns = data['metadata']['namespace']
-        dry_run = '{{ dry_run }}' == 'true'
-        if dry_run:
-            print(f'Would patch {is_name}:{tag_name}: {img} -> {new_img}')
-        else:
-            patch = json.dumps({'spec':{'tags':[{'name':tag_name,'from':{'kind':'DockerImage','name':new_img}}]}})
-            result = subprocess.run(['oc','patch','is',is_name,'-n',ns,'-p',patch], capture_output=True, text=True)
-            if result.returncode == 0:
-                print(f'✓ Patched {is_name}:{tag_name}')
-                subprocess.run(['oc','import-image',f'{is_name}:{tag_name}','-n',ns,'--confirm'], capture_output=True)
-            else:
-                print(f'✗ Failed: {result.stderr}')
-" 2>/dev/null || true
-          done
-        fi
+        echo "Fix complete."
         echo "Fix operation complete"
       store_as: fix_results
     post_check:
@@ -176,6 +136,10 @@ for tag in tags:
         oc patch is <name> -n {{ namespace }} \
           -p '{"spec":{"tags":[{"name":"<tag>","from":{"kind":"DockerImage","name":"quay.io/rhoai/<image>@sha256:..."}}]}}'
         oc import-image <name>:<tag> -n {{ namespace }} --confirm
+
+source_repos:
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+  - "https://github.com/openshift/rosa"
 
 known_bad_patterns:
   - "never change the sha256 digest when redirecting — only change the registry prefix"

@@ -94,6 +94,10 @@ steps:
 
       Dashboard: Projects → {{ project_namespace }} → Permissions → {{ username }}
 
+source_repos:
+  - "https://github.com/opendatahub-io/odh-dashboard"
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+
 known_bad_patterns:
   - "never use 'cluster-admin' as the role — it grants cluster-wide admin, not just project access"
   - "never omit the opendatahub.io/dashboard label — the dashboard won't show the permission"

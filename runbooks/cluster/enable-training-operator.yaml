@@ -65,6 +65,10 @@ steps:
       Next step: Submit a training job
         odh run model-training/submit-pytorch-job
 
+source_repos:
+  - "https://github.com/kubeflow/training-operator"
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+
 known_bad_patterns:
   - "never submit PyTorchJob without enabling the Training Operator first — the CRD won't exist"
   - "never use the training operator without disabling Istio sidecar injection in job pods"

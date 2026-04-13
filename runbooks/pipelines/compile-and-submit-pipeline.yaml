@@ -197,6 +197,11 @@ steps:
         )
       ────────────────────────────────────────────────────────
 
+source_repos:
+  - "https://github.com/opendatahub-io/data-science-pipelines"
+  - "https://github.com/kubeflow/pipelines"
+  - "https://github.com/opendatahub-io/odh-dashboard"
+
 known_bad_patterns:
   - "never use KFP SDK v1 (kfp-tekton) with DSP 2.x — it produces incompatible Tekton YAML"
   - "never compile a pipeline with @pipeline decorator but no @component decorators — it will fail"

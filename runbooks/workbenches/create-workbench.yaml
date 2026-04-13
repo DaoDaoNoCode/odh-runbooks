@@ -249,6 +249,11 @@ steps:
         Large:   7 CPU, 56Gi RAM
         X Large: 15 CPU, 120Gi RAM
 
+source_repos:
+  - "https://github.com/opendatahub-io/notebooks"
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+  - "https://github.com/opendatahub-io/odh-dashboard"
+
 known_bad_patterns:
   - "CRITICAL: never use notebooks.opendatahub.io/inject-oauth — the correct annotation is inject-auth"
   - "CRITICAL: NOTEBOOK_ARGS must include --ServerApp.base_url=/notebook/{namespace}/{name} — without it the notebook URL routing breaks"

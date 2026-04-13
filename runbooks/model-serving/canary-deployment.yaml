@@ -142,6 +142,11 @@ steps:
         oc patch inferenceservice {{ model_name }} -n {{ project_namespace }} \
           --type merge -p '{"spec":{"predictor":{"canaryTrafficPercent":0}}}'
 
+source_repos:
+  - "https://github.com/kserve/kserve"
+  - "https://github.com/opendatahub-io/odh-model-controller"
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+
 known_bad_patterns:
   - "never go directly to 100% without testing at 10% first — you cannot quickly rollback a full rollout"
   - "never canary a model with a different API schema — the traffic split will cause inconsistent responses"

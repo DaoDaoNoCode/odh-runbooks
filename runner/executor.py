@@ -156,7 +156,7 @@ class RunbookExecutor:
                 console.print(f"  [dim]• Check cluster state:  odh doctor[/dim]")
                 runbook_id = self.runbook_path or self.runbook.name
                 param_str = " ".join(f"-p {k}={v}" for k, v in self.params.items() if v is not None and str(v).strip() != "")
-                console.print(f"  [dim]• Re-check what exists: odh run {runbook_id} --mode qa {param_str}[/dim]")
+                console.print(f"  [dim]• Re-check what exists: odh run {runbook_id} --dry-run {param_str}[/dim]")
                 console.print(f"  [dim]• Ask for help:         odh ask \"why did {step.id} fail?\"[/dim]")
                 return False
 
@@ -339,8 +339,8 @@ class RunbookExecutor:
         if all_pass:
             console.print("\n[green bold]✓ All checks passed. Resource state looks correct.[/green bold]")
         else:
-            console.print("\n[yellow]Some items are missing. Run in implement mode to provision them.[/yellow]")
-            console.print("  odh run ... (no --mode flag, defaults to implement)")
+            console.print("\n[yellow]Some items are missing. Run to let Claude provision them.[/yellow]")
+            console.print("  odh run ...")
 
         return all_pass
 

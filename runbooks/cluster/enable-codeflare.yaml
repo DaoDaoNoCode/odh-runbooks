@@ -98,6 +98,12 @@ steps:
 
       Next step: odh run distributed-workloads/submit-ray-job
 
+source_repos:
+  - "https://github.com/project-codeflare/codeflare-operator"
+  - "https://github.com/project-codeflare/codeflare-sdk"
+  - "https://github.com/kubernetes-sigs/kueue"
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+
 known_bad_patterns:
   - "never install the community CodeFlare operator separately — ODH manages its own fork and they cannot coexist on the same cluster"
   - "never enable CodeFlare without also enabling Kueue — jobs will not be queued correctly"

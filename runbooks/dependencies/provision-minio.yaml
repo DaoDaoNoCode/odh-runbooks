@@ -303,6 +303,10 @@ steps:
       ⚠ This is NOT for production use. For production, use AWS S3, GCS, or
         a production-grade MinIO deployment with proper auth and TLS.
 
+source_repos:
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+  - "https://github.com/opendatahub-io/odh-dashboard"
+
 known_bad_patterns:
   - "never use this MinIO in production — it has no HA, no backup, and default credentials"
   - "never change minio_root_password to fewer than 8 characters — MinIO will reject it"

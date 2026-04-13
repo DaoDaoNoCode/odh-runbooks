@@ -1,104 +1,170 @@
 # ODH Runbooks
 
-> Set up any RHOAI/ODH component correctly with a single command — the way the dashboard expects it.
+> One command to set up any RHOAI/ODH component correctly — the way the dashboard expects it.
 
-**The problem:** RHOAI has 20+ components that interact in specific ways. Figuring out the correct setup sequence, the right labels/annotations, and the right CRD versions is hard — especially for components you haven't touched before.
+**The problem:** RHOAI has 20+ components that interact in specific ways. Figuring out the correct setup sequence, right labels/annotations, CRD versions, and what the operator auto-creates vs. what you must do manually — it's all scattered across repos, ADRs, and institutional knowledge.
 
-**What this does:** Encodes the correct setup steps for every ODH/RHOAI component as verified runbooks. Run one command, get a properly configured environment that the dashboard renders correctly.
+**What this does:** Encodes that knowledge as 66 verified runbooks. Claude reads the runbook as a reference, checks your actual cluster state, fetches the component's GitHub source code when needed to verify the correct approach, and applies only standard fixes — never workarounds.
 
 ```
 $ odh wizard evalhub/create-evaluation-run
 
-project_namespace: my-project  (discovered from cluster: 3 options)
-model_uri: models/llama3-8b    (path within your S3 bucket)
+project_namespace  my-project   (3 options discovered from your cluster)
+model_catalog_tag  granite-3.3-2b-instruct  ← default
 
-→ TrustyAI not enabled — auto-enabling
-→ No S3 connection — auto-deploying MinIO
-→ KServe not enabled — auto-enabling
+ODH Agentic Executor
+  Mode: agentic — Claude executes with judgment
+  Source repos: 4 configured
 
-Step 1/8: enable-trustyai ✓
-Step 2/8: create-evalhub-cr ✓
-Step 3/8: deploy-model (~10m) ✓
-...
+Claude is working...
 
-✓ EvalHub running: https://rhods-dashboard.../projects/my-project/evalHub
+  Checking if TrustyAI is enabled... not found
+  → Enabling TrustyAI via DSC patch (per opendatahub-operator source)
+  Checking if EvalHub CR exists... not found
+  → Creating EvalHub CR in my-project...
+  Deploying model from modelcar catalog (no S3 needed)...
+  ...
+
+✓ EvalHub evaluation run complete.
+  Dashboard: https://rhods-dashboard.../projects/my-project/evalHub
 ```
 
 ---
 
 ## Getting started
 
-**Requirements:** `oc` CLI, access to an OpenShift cluster with ODH/RHOAI installed.
+**Requirements:** Python ≥ 3.11, `oc` CLI logged into an OpenShift cluster with ODH/RHOAI installed.
 
-### Option 1 — Pull down the repo, just start prompting (recommended)
+### Install
 
 ```bash
-git clone https://github.com/DaoDaoNoCode/odh-runbooks odh-runbooks
-cd odh-runbooks
-claude   # opens Claude Code — CLAUDE.md loads automatically
-```
+# Option A — pipx (recommended, installs odh globally)
+pipx install git+https://github.com/DaoDaoNoCode/odh-runbooks
 
-That's it. Tell Claude what you want to set up. The `CLAUDE.md` in this repo
-tells Claude exactly what to do with every ODH/RHOAI request.
-
-If you want to run the `odh` CLI directly:
-```bash
-# uv — no install, just run (requires uv: brew install uv)
+# Option B — uv (no install, just run — requires uv: brew install uv)
+git clone https://github.com/DaoDaoNoCode/odh-runbooks && cd odh-runbooks
 uv run cli.py wizard evalhub/create-evaluation-run
 
-# pipx — installs odh globally
-pipx install .
+# Option C — develop locally
+git clone https://github.com/DaoDaoNoCode/odh-runbooks && cd odh-runbooks
+pip install -e .
 odh wizard evalhub/create-evaluation-run
 ```
 
-### Option 2 — No pull-down, works anywhere
+### Quick start
 
-Add one entry to your global `~/.claude/CLAUDE.md`:
+```bash
+odh start                                      # guided onboarding — what do you want to do?
+odh wizard evalhub/create-evaluation-run       # set up EvalHub end-to-end
+odh wizard model-serving/deploy-vllm-model     # deploy a vLLM model
+odh doctor                                     # what's installed on my cluster?
+odh list                                       # all 66 runbooks
+odh list --workflow                            # grouped by goal
+```
+
+---
+
+## Using with Claude Code (recommended)
+
+This is the primary integration. Claude Code reads `CLAUDE.md` automatically and becomes
+a full RHOAI platform assistant that can execute runbooks on your behalf.
+
+### Step 1 — Clone and open
+
+```bash
+git clone https://github.com/DaoDaoNoCode/odh-runbooks
+cd odh-runbooks
+claude   # Claude Code CLI opens; CLAUDE.md loads automatically
+```
+
+### Step 2 — Just ask
+
+```
+"Set up EvalHub for my-project"
+"Deploy a granite model in my namespace"  
+"What's installed on my cluster?"
+"Enable KServe and set up a vLLM model"
+```
+
+Claude Code reads the relevant runbook, collects parameters, checks your cluster, and runs the
+right `odh` commands — or executes the steps directly using the Bash tool if `odh` isn't installed.
+
+### Setting up Claude Code CLI (if you don't have it)
+
+```bash
+# Install Claude Code CLI
+npm install -g @anthropic-ai/claude-code
+
+# Or via other package managers
+brew install claude-code   # macOS (if available)
+
+# Log in
+claude login
+```
+
+Then from the repo directory:
+```bash
+claude                          # opens interactive session
+claude "set up EvalHub"         # one-shot command
+claude --dangerously-skip-permissions "odh wizard evalhub/create-evaluation-run"
+```
+
+### Using the /odh skill
+
+The repo includes a Claude Code skill at `.claude/skills/odh.md`. In any Claude Code session
+inside this repo, you can use:
+
+```
+/odh   # invokes the skill — Claude guides you to the right runbook
+```
+
+No additional setup needed — Claude Code loads skills from `.claude/skills/` automatically.
+
+### Global setup (works from any directory)
+
+Add to your `~/.claude/CLAUDE.md`:
 
 ```markdown
 ## ODH Runbooks
-When asked about RHOAI/ODH setup, see: https://github.com/DaoDaoNoCode/odh-runbooks
-Read the relevant runbook from runbooks/ and follow the steps using the Bash tool.
+When asked about RHOAI/ODH setup, fetch runbooks from:
+https://github.com/DaoDaoNoCode/odh-runbooks
+Read the relevant runbook YAML and follow the steps using Bash.
 Key runbooks: evalhub/create-evaluation-run, model-serving/deploy-vllm-model,
 cluster/full-stack-setup, rosa/install-rhoai-prerelease
 ```
 
-Claude Code reads this globally and can fetch runbooks directly from GitHub.
-No clone, no install.
-
-Or install the CLI globally once:
+Or install `odh` globally so it's available in any session:
 ```bash
 pipx install git+https://github.com/DaoDaoNoCode/odh-runbooks
 ```
 
-Then `odh` works in any directory, with any Claude Code session.
-
 ---
 
-## Quick start
+## Using with Cursor
 
-```bash
-# Don't know where to start? Run this:
-odh start
+Add the MCP server so Claude can run runbooks directly from Cursor chat.
 
-# Know what you want? Use the wizard:
-odh wizard evalhub/create-evaluation-run
-odh wizard model-serving/deploy-vllm-model
-odh wizard pipelines/create-pipeline-server
+### Add to Cursor MCP config
 
-# Check what's installed on your cluster:
-odh doctor
+In Cursor settings → MCP Servers (or `~/.cursor/mcp.json`):
 
-# See all available runbooks:
-odh list
-odh list --workflow    # grouped by goal
+```json
+{
+  "mcpServers": {
+    "odh-runbooks": {
+      "command": "python",
+      "args": ["/path/to/odh-runbooks/mcp_server.py"],
+      "env": {
+        "KUBECONFIG": "/Users/you/.kube/config"
+      }
+    }
+  }
+}
 ```
 
----
+Requires: `pip install ".[mcp]"` (installs fastmcp).
 
-## Using with Claude CLI or Cursor
-
-### Option A: MCP server (Claude calls runbooks directly in conversation)
+### Using with Claude Desktop
 
 ```bash
 claude mcp add odh-runbooks \
@@ -106,21 +172,20 @@ claude mcp add odh-runbooks \
   --env KUBECONFIG=/Users/you/.kube/config
 ```
 
-Requires `pip install fastmcp` or `uv pip install fastmcp`.
-Then ask Claude: *"Set up EvalHub for my project"* — it calls the right runbook automatically.
+Then in Claude Desktop, ask: *"Set up EvalHub for my project"* — Claude calls the right runbook.
 
-### Option B: Claude Code skills (recommended — zero setup)
+### MCP tools available
 
-Add the skills directory to your Claude Code project. Skills act as slash commands
-that tell Claude which `odh` command to run:
-
-```
-/odh-evalhub        → guides Claude to run: odh wizard evalhub/create-evaluation-run
-/odh-deploy-model   → guides Claude to run: odh wizard model-serving/deploy-vllm-model
-/odh-setup          → guides Claude to run: odh start
-```
-
-Skills are just markdown files — no Python install required. See `.claude/skills/` in this repo.
+| Tool | What it does |
+|---|---|
+| `check_cluster()` | Diagnose what ODH components are installed |
+| `list_runbooks()` | Show all 66 runbooks |
+| `search_runbooks(keyword)` | Find runbooks by keyword |
+| `show_runbook(name)` | Show steps without executing |
+| `check_dependencies(name, params)` | Preview what a runbook will auto-provision |
+| `guide_runbook(name)` | Walk through parameters with cluster discovery |
+| `run_runbook(name, params)` | Execute a runbook agentically |
+| `get_token_status()` | Check if your cluster token is valid |
 
 ---
 
@@ -128,14 +193,13 @@ Skills are just markdown files — no Python install required. See `.claude/skil
 
 | Command | What it does |
 |---|---|
-| `odh start` | Guided setup — answers "what do you want to accomplish?" |
-| `odh wizard <runbook>` | Interactive wizard for a specific runbook |
-| `odh run <runbook> -p key=value` | Execute a runbook with explicit parameters |
-| `odh run <runbook> --mode plan` | Preview what would happen (no changes) |
-| `odh run <runbook> --mode qa` | Read-only state check — is my env ready? |
+| `odh run <runbook> -p key=value` | Execute — Claude checks state, fetches source repos, executes |
+| `odh run <runbook> --dry-run -p ...` | Review — Claude checks cluster state, no changes made |
+| `odh wizard <runbook>` | Collect parameters interactively, then execute |
+| `odh start` | Guided onboarding — answers "what do you want to accomplish?" |
 | `odh list` | Show all 66 runbooks |
 | `odh list --workflow` | Runbooks grouped by goal |
-| `odh show <runbook>` | Preview a runbook's steps without running |
+| `odh show <runbook>` | Show a runbook's steps and source repos |
 | `odh doctor` | Check which ODH components are installed |
 | `odh ask [runbook]` | Get help — cluster health or runbook details |
 
@@ -143,11 +207,30 @@ Skills are just markdown files — no Python install required. See `.claude/skil
 
 ## How it works
 
-**Runbooks** are YAML files that encode the exact correct steps — right labels, annotations, CRD versions, and API calls — matching what the ODH dashboard creates and expects to render.
+**Runbooks** are YAML files that encode the correct steps — right labels, annotations, CRD versions,
+and API calls — matching exactly what the ODH dashboard creates and expects to render.
 
-**Dependency resolution** is automatic. If EvalHub needs TrustyAI and it's not enabled, the tool enables it. If your project needs an S3 bucket and none exists, it deploys MinIO. You don't need to know the prerequisites.
+**Claude executes with judgment.** The runbook is a reference guide, not a rigid script.
+Claude reads it, checks your actual cluster state with `oc` commands, and adapts to
+what's already there — skipping steps that are done, handling partial state gracefully.
 
-**Verification** happens at every step. Each step checks the resource was created correctly before moving to the next one. If something fails, it stops with a clear message — never improvises or creates hacky workarounds.
+**Source repos are the truth.** Every runbook lists the authoritative GitHub repos for
+its component. Before applying any non-obvious configuration, Claude fetches the source
+code to verify the correct approach. No workarounds — if the standard approach requires a
+prerequisite, Claude adds the prerequisite the standard way.
+
+```yaml
+# Example: runbooks/evalhub/create-evaluation-run.yaml
+source_repos:
+  - "https://github.com/eval-hub/eval-hub"
+  - "https://github.com/trustyai-explainability/trustyai-service-operator"
+  - "https://github.com/kserve/kserve"
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+```
+
+**Dependency resolution is automatic.** If EvalHub needs TrustyAI and it's not enabled,
+Claude enables it. If a project needs an S3 bucket and none exists, Claude deploys MinIO.
+You don't need to know the prerequisites.
 
 ---
 
@@ -155,20 +238,20 @@ Skills are just markdown files — no Python install required. See `.claude/skil
 
 | Area | Runbooks |
 |---|---|
-| Cluster setup | Enable KServe, pipelines, CodeFlare, TrustyAI, model registry, training operator, feature store |
-| ROSA | Install RHOAI pre-release (Kyverno workaround), stable install, GPU machinepool, teardown |
+| Cluster setup | Enable KServe, pipelines, CodeFlare, TrustyAI, model registry, training operator, feature store, full stack |
+| ROSA | Install RHOAI stable/pre-release (Kyverno workaround), GPU machinepool, fix imagestream registry |
 | Projects | Create project, add user, create S3 connection |
 | Workbenches | Create notebook (standard, GPU, with S3), add BYON image |
 | Pipelines | Create pipeline server, compile + submit, schedule recurring runs, write KFP components |
-| Model serving | KServe deploy, vLLM deploy, canary deployment, custom ServingRuntime, test endpoint |
-| Model registry | Enable, register model, deploy from registry, search |
-| EvalHub | Create evaluation run with MLflow |
-| MLflow | Enable (operator), log training run, register model from run, promote to production, LLM traces, prompt registry |
-| AutoML / AutoRAG | Run pipelines |
-| Model training | Submit PyTorchJob |
+| Model serving | KServe deploy, vLLM deploy (GPU + CPU), canary deployment, custom ServingRuntime, test endpoint |
+| Model registry | Enable, register model, deploy from registry, search models |
+| EvalHub | Create evaluation run with MLflow tracking |
+| MLflow | Enable, log training run, register model, promote to production, LLM traces, prompt registry |
 | Distributed workloads | Submit Ray job |
+| Model training | Submit PyTorchJob |
 | TrustyAI | Enable TrustyAI service for fairness monitoring |
-| Observability | Create Perses dashboard |
+| Observability | Enable Perses dashboard |
+| GenAI | Enable chat playground |
 | Dependencies | Auto-provision MinIO, S3 connection, pipeline server, PostgreSQL+pgvector |
 
 ---
@@ -181,16 +264,15 @@ Every runbook step has a confidence level so you know what to trust:
 |---|---|
 | `verified` | Tested end-to-end on a real cluster |
 | `doc-derived` | Confirmed from ODH source code or official docs |
-| `inferred` | Derived from ADRs/architecture docs — correct but not tested |
+| `inferred` | Derived from ADRs/architecture docs — probably correct, not yet cluster-tested |
 | `uncertain` | Known to be fragile or environment-dependent |
-
-The executor warns you before running `inferred` steps and always asks before `uncertain` ones.
 
 ---
 
 ## Contributing
 
-The most valuable contribution is **testing a runbook on a real cluster and fixing what's wrong**. See [CONTRIBUTING.md](CONTRIBUTING.md) for how to add or fix runbooks.
+The most valuable contribution is **testing a runbook on a real cluster and fixing what's wrong**.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to add or improve runbooks.
 
 ---
 

@@ -64,6 +64,11 @@ steps:
       Next step: Deploy a TrustyAIService in your project:
         odh run trustyai/enable-trustyai-service -p project_namespace=<ns>
 
+source_repos:
+  - "https://github.com/trustyai-explainability/trustyai-explainability"
+  - "https://github.com/trustyai-explainability/trustyai-service-operator"
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+
 known_bad_patterns:
   - "never create TrustyAIService before enabling TrustyAI in DSC — the operator won't be present"
   - "never set permitCodeExecution=deny if you want EvalHub to run evaluation jobs"

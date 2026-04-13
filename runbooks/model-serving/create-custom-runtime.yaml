@@ -155,6 +155,12 @@ steps:
         XGBoost:       docker.io/kserve/xgbserver:latest
         TorchServe:    docker.io/kserve/torchserve-kfs:0.9.0
 
+source_repos:
+  - "https://github.com/kserve/kserve"
+  - "https://github.com/opendatahub-io/odh-model-controller"
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+  - "https://github.com/opendatahub-io/odh-dashboard"
+
 known_bad_patterns:
   - "never set autoSelect: true for multiple runtimes supporting the same format and version — it creates ambiguity"
   - "never omit the readinessProbe — KServe will not mark the model as Loaded without it"

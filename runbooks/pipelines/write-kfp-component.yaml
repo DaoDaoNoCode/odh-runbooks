@@ -221,6 +221,10 @@ steps:
           key="nvidia.com/gpu", operator="Exists", effect="NoSchedule"
       ))
 
+source_repos:
+  - "https://github.com/opendatahub-io/data-science-pipelines"
+  - "https://github.com/kubeflow/pipelines"
+
 known_bad_patterns:
   - "never use @component(func=fn) style — use @dsl.component decorator directly"
   - "never pass large DataFrames as parameters — use Output[Dataset] artifacts"

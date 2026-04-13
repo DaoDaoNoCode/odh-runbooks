@@ -119,6 +119,11 @@ steps:
       Software list format example:
         [{"name":"PyTorch","version":"2.1.0","visible":true},{"name":"CUDA","version":"12.1","visible":true}]
 
+source_repos:
+  - "https://github.com/opendatahub-io/notebooks"
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+  - "https://github.com/opendatahub-io/odh-dashboard"
+
 known_bad_patterns:
   - "CRITICAL: missing app.kubernetes.io/created-by=byon label — image won't be shown in BYON section"
   - "CRITICAL: missing opendatahub.io/dashboard=true label — dashboard won't list it"

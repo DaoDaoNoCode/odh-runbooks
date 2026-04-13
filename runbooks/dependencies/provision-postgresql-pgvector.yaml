@@ -67,7 +67,7 @@ steps:
           source: certified-operators
           sourceNamespace: openshift-marketplace
     post_check:
-      command: "oc get csv -n openshift-operators --no-headers 2>/dev/null | grep -i 'crunchy\|postgres' | grep -c Succeeded || echo 0"
+      command: "oc get csv -n openshift-operators --no-headers 2>/dev/null | grep -iE 'crunchy|postgres' | grep -c Succeeded || echo 0"
       expected_min: 1
       timeout: "300s"
       poll_interval: "15s"
@@ -224,6 +224,9 @@ steps:
       Verify pgvector:
         oc exec -n {{ namespace }} deploy/{{ pg_cluster_name }}-instance1 -- \
           psql -U {{ pg_username }} -d {{ pg_database }} -c "SELECT extname, extversion FROM pg_extension WHERE extname='vector';"
+
+source_repos:
+  - "https://github.com/opendatahub-io/opendatahub-operator"
 
 known_bad_patterns:
   - "never hardcode the password — PGO auto-generates it and stores it in the secret"

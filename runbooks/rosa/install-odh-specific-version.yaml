@@ -314,6 +314,10 @@ steps:
         If "Operator Not Ready" immediately after ROSA cluster is ready,
         wait ~5 minutes and retry — ROSA needs time to stabilize.
 
+source_repos:
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+  - "https://github.com/openshift/rosa"
+
 known_bad_patterns:
   - "never run this on a cluster that already has RHOAI installed — ODH and RHOAI cannot coexist"
   - "never skip waiting for DSCI to be ready before creating DSC — the operator processes them sequentially"

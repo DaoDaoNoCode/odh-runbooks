@@ -194,6 +194,10 @@ steps:
                 mlflow.log_metric("loss", loss.item(), step=step)
       ─────────────────────────────────────────────────────
 
+source_repos:
+  - "https://github.com/kubeflow/training-operator"
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+
 known_bad_patterns:
   - "CRITICAL: never omit sidecar.istio.io/inject: false — Istio will intercept nccl traffic and break distributed training"
   - "never use nproc_per_node higher than gpu_per_worker — extra processes will fail to acquire GPUs"

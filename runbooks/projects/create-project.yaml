@@ -112,6 +112,10 @@ steps:
         odh run projects/create-s3-connection -p project_namespace={{ project_name }}
         odh run pipelines/create-pipeline-server -p project_namespace={{ project_name }}
 
+source_repos:
+  - "https://github.com/opendatahub-io/odh-dashboard"
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+
 known_bad_patterns:
   - "CRITICAL: never omit opendatahub.io/dashboard=true — the dashboard's project list is filtered by this label"
   - "never use uppercase letters or spaces in project_name — Kubernetes namespace names must be lowercase RFC 1123"

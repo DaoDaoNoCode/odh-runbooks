@@ -118,10 +118,10 @@ steps:
     description: Wait for the RHOAI CSV to reach Succeeded phase (can take 5-10 min)
     action:
       type: query
-      command: "oc get csv -n redhat-ods-operator --no-headers 2>/dev/null | grep -i 'rhods\|openshift-ai' | awk '{print $1}' | head -1"
+      command: "oc get csv -n redhat-ods-operator --no-headers 2>/dev/null | grep -iE 'rhods|openshift-ai' | awk '{print $1}' | head -1"
       store_as: csv_name
     post_check:
-      command: "oc get csv -n redhat-ods-operator --no-headers 2>/dev/null | grep -i 'rhods\|openshift-ai' | awk '{print $NF}'"
+      command: "oc get csv -n redhat-ods-operator --no-headers 2>/dev/null | grep -iE 'rhods|openshift-ai' | awk '{print $NF}'"
       expected: "Succeeded"
       timeout: "600s"
       poll_interval: "20s"
@@ -141,6 +141,10 @@ steps:
         odh run cluster/full-stack-setup -p ...
 
       NOTE: For pre-release testing, use rosa/install-rhoai-prerelease instead.
+
+source_repos:
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+  - "https://github.com/openshift/rosa"
 
 known_bad_patterns:
   - "never use this runbook for pre-release/RC testing — use rosa/install-rhoai-prerelease which handles the Kyverno pull secret workaround"

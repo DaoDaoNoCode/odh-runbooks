@@ -220,6 +220,12 @@ steps:
 
       Dashboard: Projects → {{ project_namespace }} → Models and model servers
 
+source_repos:
+  - "https://github.com/kserve/kserve"
+  - "https://github.com/opendatahub-io/odh-model-controller"
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+  - "https://github.com/opendatahub-io/odh-dashboard"
+
 known_bad_patterns:
   - "CRITICAL: LLMInferenceService uses a DIFFERENT CRD from standard InferenceService — do not confuse v1alpha1 LLMInferenceService with v1beta1 InferenceService"
   - "CRITICAL: the label is dashboard.opendatahub.io/dashboard-resource (note: different prefix from standard opendatahub.io/dashboard)"

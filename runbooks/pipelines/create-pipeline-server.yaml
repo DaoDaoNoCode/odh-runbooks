@@ -211,6 +211,12 @@ steps:
         - accessKey/secretKey = the KEY NAMES in the secret (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY)
         - secretName = the Kubernetes secret resource name
 
+source_repos:
+  - "https://github.com/opendatahub-io/data-science-pipelines-operator"
+  - "https://github.com/opendatahub-io/data-science-pipelines"
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+  - "https://github.com/opendatahub-io/odh-dashboard"
+
 known_bad_patterns:
   - "CRITICAL: s3CredentialsSecret.accessKey is the KEY NAME in the secret (AWS_ACCESS_KEY_ID), not the actual access key value"
   - "CRITICAL: host must be hostname only without scheme or trailing slash — scheme goes in the 'scheme' field"

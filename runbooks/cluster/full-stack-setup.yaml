@@ -325,6 +325,16 @@ steps:
         -p model_format=sklearn \
         -p model_uri=s3://{{ s3_bucket }}/models/test
 
+source_repos:
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+  - "https://github.com/kserve/kserve"
+  - "https://github.com/opendatahub-io/odh-model-controller"
+  - "https://github.com/opendatahub-io/data-science-pipelines-operator"
+  - "https://github.com/trustyai-explainability/trustyai-explainability"
+  - "https://github.com/trustyai-explainability/trustyai-service-operator"
+  - "https://github.com/opendatahub-io/model-registry-operator"
+  - "https://github.com/opendatahub-io/odh-dashboard"
+
 known_bad_patterns:
   - "never run this runbook on a cluster with existing ODH resources — it may conflict"
   - "never skip the wait-components-ready step — enabling all components at once can cause race conditions"

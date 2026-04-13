@@ -1,152 +1,187 @@
 # ODH Runbook Library
 
-All runbooks below can be generated with:
-  odh generate <component> "<task>"
-
-Then reviewed and saved to the appropriate path. After testing on a real cluster,
-promote confidence levels from `inferred` → `doc-derived` → `verified`.
+Status of all 66 runbooks in this repo.
 
 ## Status legend
-- [ ] not yet generated
-- [D] draft generated, not tested
-- [T] tested on cluster, confidence promoted
-- [V] fully verified
+
+| Symbol | Meaning |
+|---|---|
+| [D] | Draft — exists, not tested on a real cluster |
+| [T] | Tested — ran on real cluster, confidence promoted |
+| [V] | Verified — tested twice, marked `verified` |
+
+All runbooks have `source_repos` configured so Claude knows which GitHub repos to check when something fails.
+
+Generate new drafts with:
+```bash
+odh generate <component> "<task>"
+```
+
+Then test, fix, and promote confidence: `inferred` → `doc-derived` → `verified`.
 
 ---
 
 ## Cluster / Operator
 
-| Status | Path | Description |
-|--------|------|-------------|
-| [D] | cluster/enable-trustyai | Enable TrustyAI in DataScienceCluster |
-| [ ] | cluster/enable-kserve | Enable KServe single-model serving |
-| [ ] | cluster/enable-modelmesh | Enable ModelMesh multi-model serving |
-| [ ] | cluster/enable-pipelines | Enable Data Science Pipelines |
-| [ ] | cluster/enable-codeflare | Enable CodeFlare / distributed workloads |
-| [ ] | cluster/enable-mlflow | Enable MLflow experiment tracking |
-| [ ] | cluster/enable-feature-store | Enable Feast feature store |
-| [ ] | cluster/enable-ray | Enable Ray distributed computing |
-| [ ] | cluster/configure-culler | Configure notebook auto-stop (culler) |
-| [ ] | cluster/configure-model-serving-platform | Set cluster-wide serving platform (KServe vs ModelMesh) |
+| Status | Path | Source repos checked |
+|--------|------|---------------------|
+| [D] | `cluster/full-stack-setup` | opendatahub-operator, kserve, data-science-pipelines-operator, trustyai |
+| [D] | `cluster/enable-kserve` | kserve, odh-model-controller, opendatahub-operator |
+| [D] | `cluster/enable-pipelines` | data-science-pipelines-operator, data-science-pipelines |
+| [D] | `cluster/enable-trustyai` | trustyai-explainability, trustyai-service-operator |
+| [D] | `cluster/enable-codeflare` | codeflare-operator, kueue |
+| [D] | `cluster/enable-training-operator` | training-operator |
+| [D] | `cluster/enable-model-registry` | model-registry-operator, kubeflow/model-registry |
+| [D] | `cluster/enable-feature-store` | feast-dev/feast |
+| [D] | `cluster/configure-cluster-settings` | opendatahub-operator, odh-dashboard |
+| [D] | `cluster/configure-group-settings` | opendatahub-operator, odh-dashboard |
+| [D] | `cluster/configure-storage-classes` | opendatahub-operator |
+| [D] | `cluster/configure-culler` | notebooks, opendatahub-operator |
+| [D] | `cluster/create-hardware-profile` | opendatahub-operator, odh-dashboard |
+| [D] | `cluster/create-connection-type` | odh-dashboard |
 
 ## GPU
 
-| Status | Path | Description |
-|--------|------|-------------|
-| [ ] | gpu/add-gpu-node-ocm | Add a GPU node via OpenShift Cluster Manager (OCM) |
-| [ ] | gpu/install-gpu-operator | Install NVIDIA GPU Operator on OpenShift |
-| [ ] | gpu/verify-gpu-available | Verify GPU is visible and allocatable in the cluster |
-| [ ] | gpu/install-amd-gpu-operator | Install AMD ROCm GPU Operator |
-| [ ] | gpu/configure-time-slicing | Configure NVIDIA GPU time-slicing for shared access |
+| Status | Path | Source repos checked |
+|--------|------|---------------------|
+| [D] | `gpu/install-gpu-operator` | NVIDIA/gpu-operator |
+| [D] | `gpu/add-gpu-node-ocm` | NVIDIA/gpu-operator, openshift/rosa |
+| [D] | `gpu/verify-gpu-available` | NVIDIA/gpu-operator |
+
+## ROSA
+
+| Status | Path | Source repos checked |
+|--------|------|---------------------|
+| [D] | `rosa/install-rhoai-stable` | opendatahub-operator, openshift/rosa |
+| [D] | `rosa/install-rhoai-prerelease` | opendatahub-operator, openshift/rosa |
+| [D] | `rosa/install-odh-specific-version` | opendatahub-operator, openshift/rosa |
+| [D] | `rosa/setup-gpu-machinepool` | NVIDIA/gpu-operator, openshift/rosa |
+| [D] | `rosa/verify-rhoai-install` | opendatahub-operator, openshift/rosa |
+| [D] | `rosa/fix-imagestream-registry` | opendatahub-operator, openshift/rosa |
+| [D] | `rosa/prepare-registry-credentials` | opendatahub-operator, openshift/rosa |
+| [D] | `rosa/teardown-kyverno` | opendatahub-operator |
 
 ## Projects
 
-| Status | Path | Description |
-|--------|------|-------------|
-| [ ] | projects/create-project | Create a new Data Science Project |
-| [ ] | projects/add-user-to-project | Add a user to an existing project |
-| [ ] | projects/create-connection | Create an S3/database connection in a project |
+| Status | Path | Source repos checked |
+|--------|------|---------------------|
+| [D] | `projects/create-project` | odh-dashboard, opendatahub-operator |
+| [D] | `projects/add-user-to-project` | odh-dashboard, opendatahub-operator |
+| [D] | `projects/create-s3-connection` | odh-dashboard, opendatahub-operator |
 
 ## Workbenches
 
-| Status | Path | Description |
-|--------|------|-------------|
-| [ ] | workbenches/create-workbench | Create a Jupyter workbench in a project |
-| [ ] | workbenches/create-workbench-gpu | Create a workbench with GPU resource |
-| [ ] | workbenches/stop-workbench | Stop a running workbench |
-| [ ] | workbenches/add-byon-image | Add a custom (BYON) notebook image |
-| [ ] | workbenches/add-storage-to-workbench | Attach PVC storage to a workbench |
+| Status | Path | Source repos checked |
+|--------|------|---------------------|
+| [D] | `workbenches/create-workbench` | notebooks, opendatahub-operator, odh-dashboard |
+| [D] | `workbenches/create-workbench-gpu` | notebooks, opendatahub-operator, odh-dashboard |
+| [D] | `workbenches/create-workbench-with-connection` | notebooks, opendatahub-operator, odh-dashboard |
+| [D] | `workbenches/add-byon-image` | notebooks, odh-dashboard |
 
-## Pipelines (DSP)
+## Pipelines
 
-| Status | Path | Description |
-|--------|------|-------------|
-| [ ] | pipelines/enable-dsp | Enable Data Science Pipelines in a project |
-| [ ] | pipelines/create-pipeline-server | Create a DSPA (pipeline server) in a project |
-| [ ] | pipelines/upload-and-run-pipeline | Upload a KFP pipeline YAML and create a run |
-| [ ] | pipelines/schedule-pipeline | Create a recurring pipeline schedule |
-| [ ] | pipelines/run-automl-pipeline | Run the AutoML pipeline on a dataset |
-| [ ] | pipelines/run-autorag-pipeline | Run the AutoRAG optimization pipeline |
+| Status | Path | Source repos checked |
+|--------|------|---------------------|
+| [D] | `pipelines/create-pipeline-server` | data-science-pipelines-operator, data-science-pipelines, kubeflow/pipelines |
+| [D] | `pipelines/upload-and-run-pipeline` | data-science-pipelines, kubeflow/pipelines |
+| [D] | `pipelines/compile-and-submit-pipeline` | data-science-pipelines, kubeflow/pipelines |
+| [D] | `pipelines/create-recurring-run` | data-science-pipelines, kubeflow/pipelines |
+| [D] | `pipelines/write-kfp-component` | data-science-pipelines, kubeflow/pipelines |
 
 ## Model Serving
 
-| Status | Path | Description |
-|--------|------|-------------|
-| [ ] | model-serving/deploy-kserve-model | Deploy a model via KServe InferenceService |
-| [ ] | model-serving/deploy-modelmesh-model | Deploy a model via ModelMesh |
-| [ ] | model-serving/deploy-vllm-model | Deploy an LLM with vLLM serving runtime |
-| [ ] | model-serving/create-serving-runtime | Register a custom ServingRuntime |
-| [ ] | model-serving/test-model-endpoint | Send a test request to a deployed model |
-| [ ] | model-serving/enable-token-auth | Enable token authentication on a model endpoint |
+| Status | Path | Source repos checked |
+|--------|------|---------------------|
+| [D] | `model-serving/deploy-vllm-model` | kserve, odh-model-controller, vllm-project/vllm |
+| [D] | `model-serving/deploy-kserve-model` | kserve, odh-model-controller |
+| [D] | `model-serving/deploy-llmd-model` | kserve, odh-model-controller |
+| [D] | `model-serving/canary-deployment` | kserve, odh-model-controller |
+| [D] | `model-serving/create-custom-runtime` | kserve, odh-model-controller |
+| [D] | `model-serving/test-model-endpoint` | kserve |
 
 ## Model Registry
 
-| Status | Path | Description |
-|--------|------|-------------|
-| [ ] | model-registry/enable-registry | Create a new Model Registry instance |
-| [ ] | model-registry/register-model | Register a model version in the registry |
-| [ ] | model-registry/deploy-from-registry | Deploy a registered model to KServe |
-| [ ] | model-registry/add-user-to-registry | Grant a user access to a model registry |
+| Status | Path | Source repos checked |
+|--------|------|---------------------|
+| [D] | `model-registry/enable-registry` | model-registry-operator, kubeflow/model-registry |
+| [D] | `model-registry/register-model` | model-registry-operator, kubeflow/model-registry |
+| [D] | `model-registry/deploy-from-registry` | model-registry-operator, kserve |
+| [D] | `model-registry/search-and-compare-models` | model-registry-operator, kubeflow/model-registry |
 
 ## EvalHub
 
-| Status | Path | Description |
-|--------|------|-------------|
-| [D] | evalhub/create-evaluation-run | Create an evaluation run linked to MLflow |
-| [ ] | evalhub/run-safety-evaluation | Run garak safety evaluation on a deployed model |
-| [ ] | evalhub/run-benchmark-collection | Run a named benchmark collection (leaderboard-v2) |
-
-## GenAI / Chat Playground
-
-| Status | Path | Description |
-|--------|------|-------------|
-| [ ] | genai/enable-chat-playground | Enable the GenAI chat playground in the dashboard |
-| [ ] | genai/connect-model-to-playground | Connect a deployed model to the chat playground |
-| [ ] | genai/configure-llama-stack | Configure Llama Stack for the GenAI plugin |
-| [ ] | genai/enable-maas | Enable Model-as-a-Service (MaaS) |
+| Status | Path | Source repos checked |
+|--------|------|---------------------|
+| [D] | `evalhub/create-evaluation-run` | eval-hub/eval-hub, trustyai-service-operator, kserve |
 
 ## MLflow
 
-| Status | Path | Description |
-|--------|------|-------------|
-| [ ] | mlflow/enable-mlflow | Enable MLflow in a project |
-| [ ] | mlflow/create-experiment | Create an MLflow experiment |
-| [ ] | mlflow/view-experiment-runs | Get experiment run URLs for a project |
+| Status | Path | Source repos checked |
+|--------|------|---------------------|
+| [D] | `mlflow/enable-mlflow` | mlflow/mlflow, opendatahub-operator |
+| [D] | `mlflow/log-training-run` | mlflow/mlflow |
+| [D] | `mlflow/create-llm-trace` | mlflow/mlflow |
+| [D] | `mlflow/register-model-from-run` | mlflow/mlflow, kubeflow/model-registry |
+| [D] | `mlflow/promote-model-to-production` | mlflow/mlflow, kubeflow/model-registry |
+| [D] | `mlflow/manage-prompts` | mlflow/mlflow |
+| [D] | `mlflow/search-and-compare-runs` | mlflow/mlflow |
 
 ## Distributed Workloads
 
-| Status | Path | Description |
-|--------|------|-------------|
-| [ ] | distributed-workloads/submit-ray-job | Submit a Ray distributed training job |
-| [ ] | distributed-workloads/create-ray-cluster | Create a RayCluster for interactive use |
-| [ ] | distributed-workloads/configure-kueue-quota | Set up Kueue resource quotas for a team |
+| Status | Path | Source repos checked |
+|--------|------|---------------------|
+| [D] | `distributed-workloads/submit-ray-job` | codeflare-operator, codeflare-sdk, ray-project/ray, kueue |
 
-## Hardware Profiles
+## Model Training
 
-| Status | Path | Description |
-|--------|------|-------------|
-| [ ] | cluster/create-hardware-profile | Create a hardware profile (CPU/GPU tier) |
-| [ ] | cluster/create-toleration-profile | Add node toleration to a hardware profile |
+| Status | Path | Source repos checked |
+|--------|------|---------------------|
+| [D] | `model-training/submit-pytorch-job` | kubeflow/training-operator |
+
+## TrustyAI
+
+| Status | Path | Source repos checked |
+|--------|------|---------------------|
+| [D] | `trustyai/enable-trustyai-service` | trustyai-explainability, trustyai-service-operator |
+
+## Observability
+
+| Status | Path | Source repos checked |
+|--------|------|---------------------|
+| [D] | `observability/enable-perses-dashboard` | perses/perses, perses/perses-operator |
+
+## GenAI
+
+| Status | Path | Source repos checked |
+|--------|------|---------------------|
+| [D] | `genai/enable-chat-playground` | odh-dashboard, kserve |
+
+## AutoML / AutoRAG
+
+| Status | Path | Source repos checked |
+|--------|------|---------------------|
+| [D] | `automl/run-automl-pipeline` | data-science-pipelines-operator, kubeflow/pipelines |
+| [D] | `autorag/run-autorag-pipeline` | kserve, data-science-pipelines-operator |
+
+## Dependencies (auto-provisioned)
+
+These runbooks are called automatically when a dependency is missing — users never call them directly.
+
+| Status | Path | What it provisions |
+|--------|------|-------------------|
+| [D] | `dependencies/provision-minio` | MinIO S3-compatible storage (dev/test only) |
+| [D] | `dependencies/provision-s3-connection` | S3 Secret in a namespace |
+| [D] | `dependencies/provision-pipeline-server` | DSPA (pipeline server) in a namespace |
+| [D] | `dependencies/provision-postgresql-pgvector` | PostgreSQL with pgvector extension |
 
 ---
 
-## Adding new runbooks
+## Priority: promote these to `verified`
 
-1. Generate a draft:
-   ```
-   odh generate <component> "<task description>"
-   ```
+Most-used runbooks that would benefit most from real cluster testing:
 
-2. Review the YAML, fix anything obviously wrong
-
-3. Test on a throwaway cluster:
-   ```
-   odh run <component>/<runbook-name> --param ...
-   ```
-
-4. For every step that worked correctly, change confidence from `inferred` → `doc-derived`
-
-5. After a second successful run with no manual intervention, update `rhoai_version_tested`
-   and change `confidence_overall` to `doc-derived`
-
-6. Commit. Others can now use it reliably.
+1. `evalhub/create-evaluation-run` — core use case for the whole project
+2. `model-serving/deploy-vllm-model` — most common model deployment
+3. `cluster/enable-kserve` — prerequisite for model serving
+4. `cluster/full-stack-setup` — the big one
+5. `rosa/install-rhoai-prerelease` — complex multi-step, high value if it works reliably

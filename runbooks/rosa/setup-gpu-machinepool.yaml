@@ -21,7 +21,7 @@ confidence_overall: doc-derived
 
 parameters:
   - name: cluster_name
-    description: ROSA cluster name (from: rosa list clusters)
+    description: "ROSA cluster name (from: rosa list clusters)"
     required: true
   - name: machinepool_name
     description: Name for the GPU machinepool
@@ -377,6 +377,10 @@ steps:
         oc describe node <gpu-node> | grep nvidia.com/gpu
         oc get pods -n nvidia-gpu-operator
         oc get acceleratorprofiles -n redhat-ods-applications
+
+source_repos:
+  - "https://github.com/NVIDIA/gpu-operator"
+  - "https://github.com/openshift/rosa"
 
 known_bad_patterns:
   - "CRITICAL: AcceleratorProfile is the correct resource for GPU in RHOAI workbenches — not HardwareProfile"

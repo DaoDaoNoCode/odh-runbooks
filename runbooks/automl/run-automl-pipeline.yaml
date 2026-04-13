@@ -157,6 +157,12 @@ steps:
         medium_quality  — Decent accuracy, fast (5-15 min)
       ─────────────────────────────────────────────────────
 
+source_repos:
+  - "https://github.com/opendatahub-io/data-science-pipelines-operator"
+  - "https://github.com/opendatahub-io/data-science-pipelines"
+  - "https://github.com/kubeflow/pipelines"
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+
 known_bad_patterns:
   - "never run AutoML on raw unvalidated data — ensure no NaN in label column"
   - "never use best_quality preset without GPU nodes — it will run for many hours on CPU"

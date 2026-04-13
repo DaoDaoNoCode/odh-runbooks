@@ -471,6 +471,12 @@ rollback_order:
   - "oc delete inferenceservice {{ model_name }} -n {{ project_namespace }} 2>/dev/null || true"
   - "oc delete role eval-hub-user-access rolebinding eval-hub-user-access sa eval-hub-job -n {{ project_namespace }} 2>/dev/null || true"
 
+source_repos:
+  - "https://github.com/trustyai-explainability/trustyai-service-operator"
+  - "https://github.com/opendatahub-io/trustyai-explainability"
+  - "https://github.com/kserve/kserve"
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+
 tags: ["evalhub", "mlflow", "model-serving", "trustyai"]
 estimated_minutes: 25
 next_steps:

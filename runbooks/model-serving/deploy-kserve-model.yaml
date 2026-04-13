@@ -56,11 +56,11 @@ parameters:
     enum: ["Predictive", "Generative"]
     hint: "sklearn/xgboost/onnx=Predictive, vllm=Generative. Stored in opendatahub.io/model-type annotation."
   - name: cpu_request
-    description: CPU request (path: spec.predictor.model.resources.requests.cpu)
+    description: "CPU request (path: spec.predictor.model.resources.requests.cpu)"
     required: false
     default: "1"
   - name: memory_request
-    description: Memory request (path: spec.predictor.model.resources.requests.memory)
+    description: "Memory request (path: spec.predictor.model.resources.requests.memory)"
     required: false
     default: "4Gi"
   - name: min_replicas
@@ -187,6 +187,12 @@ steps:
         curl -X POST {{ model_url }}/v2/models/{{ model_name }}/infer \
           -H "Content-Type: application/json" \
           -d '{"inputs": [{"name": "input", "shape": [1], "datatype": "FP32", "data": [1.0]}]}'
+
+source_repos:
+  - "https://github.com/kserve/kserve"
+  - "https://github.com/opendatahub-io/odh-model-controller"
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+  - "https://github.com/opendatahub-io/odh-dashboard"
 
 known_bad_patterns:
   - "CRITICAL: never omit opendatahub.io/model-type annotation — the dashboard always sets it and uses it for filtering"

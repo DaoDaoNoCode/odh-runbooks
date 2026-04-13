@@ -96,6 +96,10 @@ steps:
           -H "Content-Type: application/json" \
           -d '{"model":"{{ model_name }}","messages":[{"role":"user","content":"Hello!"}]}'
 
+source_repos:
+  - "https://github.com/kserve/kserve"
+  - "https://github.com/opendatahub-io/odh-model-controller"
+
 known_bad_patterns:
   - "never test a model that is not in Loaded state — the request will fail with a confusing error"
   - "never send production traffic to a model that hasn't passed this test"

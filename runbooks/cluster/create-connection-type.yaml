@@ -110,6 +110,10 @@ steps:
 
       Available field types: short-text, text, masked, boolean, dropdown, uri
 
+source_repos:
+  - "https://github.com/opendatahub-io/odh-dashboard"
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+
 known_bad_patterns:
   - "CRITICAL: missing opendatahub.io/connection-type=true label — connection type won't appear in dashboard"
   - "CRITICAL: missing opendatahub.io/dashboard=true label — also required"

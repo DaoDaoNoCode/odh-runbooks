@@ -125,6 +125,12 @@ steps:
 
       Dashboard: Projects → {{ project_namespace }} → Pipelines → Runs → {{ run_name }}
 
+source_repos:
+  - "https://github.com/opendatahub-io/data-science-pipelines-operator"
+  - "https://github.com/opendatahub-io/data-science-pipelines"
+  - "https://github.com/kubeflow/pipelines"
+  - "https://github.com/opendatahub-io/odh-dashboard"
+
 known_bad_patterns:
   - "never upload pipelines compiled with an older KFP SDK version than the server supports"
   - "never create a run without first verifying the pipeline uploaded successfully"

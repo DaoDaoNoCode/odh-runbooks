@@ -314,6 +314,12 @@ steps:
       NOTE for CPU deployments: ~3 tokens/s — very slow, not for production.
       For LlamaStack integration, use this endpoint as the VLLM_URL.
 
+source_repos:
+  - "https://github.com/kserve/kserve"
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+  - "https://github.com/vllm-project/vllm"
+  - "https://github.com/rh-aiservices-bu/vllm-openai-ubi9"
+
 known_bad_patterns:
   - "CRITICAL: for GPU, never create 'vLLM NVIDIA GPU ServingRuntime for KServe' — it is BUILT-IN in RHOAI, reference it by name"
   - "CRITICAL: GPU and CPU use different --chat-template paths — GPU=/opt/app-root/template/..., CPU=/workspace/vllm/examples/..."

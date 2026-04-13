@@ -169,6 +169,10 @@ steps:
 
       The original runbook can now continue.
 
+source_repos:
+  - "https://github.com/opendatahub-io/odh-dashboard"
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+
 known_bad_patterns:
   - "never use auto-provisioned MinIO credentials in production pipelines"
   - "never leave default minio/minio123 credentials in a production cluster"

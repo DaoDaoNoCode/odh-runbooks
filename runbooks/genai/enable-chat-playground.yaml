@@ -101,6 +101,12 @@ steps:
           -H "Content-Type: application/json" \
           -d '{"model": "{{ model_name }}", "messages": [{"role": "user", "content": "Hello!"}], "stream": false}'
 
+source_repos:
+  - "https://github.com/opendatahub-io/odh-dashboard"
+  - "https://github.com/kserve/kserve"
+  - "https://github.com/opendatahub-io/odh-model-controller"
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+
 known_bad_patterns:
   - "never try to use the chat playground with a non-LLM model — it requires an OpenAI-compatible /v1/chat/completions endpoint"
   - "never expect the playground to appear without the model being fully loaded (Loaded state)"

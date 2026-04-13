@@ -75,6 +75,10 @@ steps:
 
       Status: Ready for GPU workloads.
 
+source_repos:
+  - "https://github.com/NVIDIA/gpu-operator"
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+
 known_bad_patterns:
   - "this runbook is read-only — no action needed if checks pass"
 

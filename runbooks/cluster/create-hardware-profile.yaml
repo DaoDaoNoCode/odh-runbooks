@@ -123,6 +123,10 @@ steps:
         Large:   7 CPU 56Gi
         X Large: 15 CPU 120Gi
 
+source_repos:
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+  - "https://github.com/opendatahub-io/odh-dashboard"
+
 known_bad_patterns:
   - "CRITICAL: API version must be v1 (not v1alpha1) — source code uses dashboard.opendatahub.io/v1"
   - "CRITICAL: opendatahub.io/disabled must be set as a string annotation (not a spec field)"

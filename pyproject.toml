@@ -27,4 +27,4 @@ odh = "cli:cli"
 odh-mcp = "mcp_server:mcp.run"
 
 [tool.hatch.build.targets.wheel]
-packages = ["runner", "generator", "assistant"]
+packages = ["runner", "generator"]

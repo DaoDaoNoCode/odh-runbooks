@@ -74,6 +74,11 @@ steps:
       Next step: Create a registry instance
         odh run model-registry/enable-registry -p registry_name=model-registry
 
+source_repos:
+  - "https://github.com/opendatahub-io/model-registry-operator"
+  - "https://github.com/kubeflow/model-registry"
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+
 known_bad_patterns:
   - "never create ModelRegistry CRs before enabling the component — the operator won't be present"
   - "never delete the odh-model-registries namespace manually — it is managed by the operator"

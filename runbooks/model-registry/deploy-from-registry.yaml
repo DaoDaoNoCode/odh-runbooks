@@ -228,6 +228,13 @@ steps:
         ✓ ServiceMonitor (Prometheus)
         ✓ PodMonitor
 
+source_repos:
+  - "https://github.com/opendatahub-io/model-registry-operator"
+  - "https://github.com/kubeflow/model-registry"
+  - "https://github.com/kserve/kserve"
+  - "https://github.com/opendatahub-io/odh-model-controller"
+  - "https://github.com/opendatahub-io/odh-dashboard"
+
 known_bad_patterns:
   - "CRITICAL: model registry labels must use prefix 'modelregistry.opendatahub.io/' not 'model-registry/'"
   - "CRITICAL: model registry links must be LABELS not annotations — wrong type means the controller won't recognize them"

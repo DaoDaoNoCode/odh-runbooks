@@ -163,6 +163,11 @@ steps:
       Dashboard: Model Registry → {{ model_name }} → Version {{ model_version }}
       Next step: odh run model-registry/deploy-from-registry -p registry_name={{ registry_name }} -p model_version_id={{ model_version_obj.id }}
 
+source_repos:
+  - "https://github.com/opendatahub-io/model-registry-operator"
+  - "https://github.com/kubeflow/model-registry"
+  - "https://github.com/opendatahub-io/odh-dashboard"
+
 known_bad_patterns:
   - "never create a ModelArtifact without first creating RegisteredModel + ModelVersion — the foreign key will fail"
   - "never use an unreachable URI in model_uri — the registry accepts it but deployment will fail later"

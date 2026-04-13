@@ -120,6 +120,10 @@ steps:
             span.set_outputs({"num_docs": len(docs)})
       ────────────────────────────────────────────────────────
 
+source_repos:
+  - "https://github.com/mlflow/mlflow"
+  - "https://github.com/opendatahub-io/odh-dashboard"
+
 known_bad_patterns:
   - "never use mlflow.openai.autolog() without setting the tracking URI first — traces go to the default local filesystem"
   - "never log PII (user messages, personal info) in traces without data governance approval"

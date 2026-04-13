@@ -135,6 +135,11 @@ steps:
         "0 0 * * 0"     = Every Sunday midnight
         "*/30 * * * *"  = Every 30 minutes
 
+source_repos:
+  - "https://github.com/opendatahub-io/data-science-pipelines"
+  - "https://github.com/kubeflow/pipelines"
+  - "https://github.com/opendatahub-io/odh-dashboard"
+
 known_bad_patterns:
   - "never set max_concurrency > 1 for pipelines with shared resources (databases, models) — runs will conflict"
   - "never use no_catchup=false with a long-paused schedule — it will create a backfill of all missed runs"

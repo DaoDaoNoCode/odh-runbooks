@@ -93,6 +93,11 @@ steps:
 
       Dashboard: Cluster Settings → Stop idle notebooks → Enabled ({{ idle_timeout_minutes }} min)
 
+source_repos:
+  - "https://github.com/opendatahub-io/notebooks"
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+  - "https://github.com/opendatahub-io/odh-dashboard"
+
 known_bad_patterns:
   - "never set CULL_IDLE_TIME to 0 with ENABLE_CULLING=true — behavior is undefined"
   - "never set the timeout below 15 minutes — notebooks have background activity that triggers false idle detection"

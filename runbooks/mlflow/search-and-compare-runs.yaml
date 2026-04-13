@@ -109,6 +109,10 @@ steps:
         best_run_id = runs.iloc[0]["run_id"]
       ────────────────────────────────────────────────────────
 
+source_repos:
+  - "https://github.com/mlflow/mlflow"
+  - "https://github.com/opendatahub-io/odh-dashboard"
+
 known_bad_patterns:
   - "never use OR in filter strings — MLflow only supports AND between conditions"
   - "never search without specifying experiment_ids — it searches ALL experiments and is slow"

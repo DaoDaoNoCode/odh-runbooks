@@ -294,7 +294,7 @@ async def run_start(cluster=None) -> None:
     import yaml
     from .schema import Runbook
     from .wizard import run_wizard
-    from .executor import RunbookExecutor, RunMode
+    from .agentic import run_agentic
 
     yaml_path = RUNBOOKS_DIR / f"{first_runbook}.yaml"
     if not yaml_path.exists():
@@ -313,14 +313,12 @@ async def run_start(cluster=None) -> None:
         if p.name not in params and p.default is not None:
             params[p.name] = p.default
 
-    if Confirm.ask("\nPreview plan before executing?", default=True):
-        executor = RunbookExecutor(runbook, params, cluster, mode=RunMode.PLAN)
-        await executor.run()
+    if Confirm.ask("\nPreview cluster state first?", default=True):
+        await run_agentic(runbook, params, cluster, runbook_path=first_runbook, dry_run=True)
         console.print()
 
     if Confirm.ask("Execute now?", default=False):
-        executor = RunbookExecutor(runbook, params, cluster, mode=RunMode.IMPLEMENT)
-        success = await executor.run()
+        success = await run_agentic(runbook, params, cluster, runbook_path=first_runbook)
         if success and len(wf["steps"]) > 1:
             console.print(f"\n[green bold]Step 1 complete![/green bold]")
             console.print(f"\n[bold]Next step:[/bold] {wf['steps'][1][1]}")

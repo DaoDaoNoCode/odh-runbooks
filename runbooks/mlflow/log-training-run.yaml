@@ -172,6 +172,10 @@ steps:
       Next: Register this model
         odh run mlflow/register-model-from-run -p run_id={{ run.info.run_id }}
 
+source_repos:
+  - "https://github.com/mlflow/mlflow"
+  - "https://github.com/opendatahub-io/odh-dashboard"
+
 known_bad_patterns:
   - "never log params after the run is marked FINISHED — they will be silently ignored"
   - "never create a run without an experiment_id — it goes to the Default experiment and is hard to find"

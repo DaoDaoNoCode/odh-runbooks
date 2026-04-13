@@ -16,15 +16,15 @@ steps:
     requires:
       - type: openshift-cluster
     pre_check:
-      command: "oc get csv -n redhat-ods-operator --no-headers 2>/dev/null | grep -i 'rhods\|openshift-ai' | wc -l | tr -d ' '"
+      command: "oc get csv -n redhat-ods-operator --no-headers 2>/dev/null | grep -iE 'rhods|openshift-ai' | wc -l | tr -d ' '"
       expected_min: 1
       on_fail: STOP
     action:
       type: query
-      command: "oc get csv -n redhat-ods-operator --no-headers 2>/dev/null | grep -i 'rhods\|openshift-ai'"
+      command: "oc get csv -n redhat-ods-operator --no-headers 2>/dev/null | grep -iE 'rhods|openshift-ai'"
       store_as: csv_status
     post_check:
-      command: "oc get csv -n redhat-ods-operator --no-headers 2>/dev/null | grep -i 'rhods\|openshift-ai' | awk '{print $NF}'"
+      command: "oc get csv -n redhat-ods-operator --no-headers 2>/dev/null | grep -iE 'rhods|openshift-ai' | awk '{print $NF}'"
       expected: "Succeeded"
       timeout: "30s"
       on_fail: STOP
@@ -37,7 +37,7 @@ steps:
       command: "oc get pods -n redhat-ods-operator --no-headers 2>/dev/null"
       store_as: operator_pods
     post_check:
-      command: "oc get pods -n redhat-ods-operator --no-headers 2>/dev/null | grep -v 'Running\|Completed' | wc -l | tr -d ' '"
+      command: "oc get pods -n redhat-ods-operator --no-headers 2>/dev/null | grep -vE 'Running|Completed' | wc -l | tr -d ' '"
       expected: "0"
       timeout: "30s"
       on_fail: STOP
@@ -131,6 +131,10 @@ steps:
 
       If everything looks good, run:
         odh run cluster/full-stack-setup -p s3_endpoint=... ...
+
+source_repos:
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+  - "https://github.com/openshift/rosa"
 
 known_bad_patterns:
   - "this is a read-only runbook — no changes are made"

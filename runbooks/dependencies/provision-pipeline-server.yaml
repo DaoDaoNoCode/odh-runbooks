@@ -117,6 +117,12 @@ steps:
 
       The original runbook can now continue.
 
+source_repos:
+  - "https://github.com/opendatahub-io/data-science-pipelines-operator"
+  - "https://github.com/opendatahub-io/data-science-pipelines"
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+  - "https://github.com/opendatahub-io/odh-dashboard"
+
 known_bad_patterns:
   - "never create a DSPA without an S3 connection — it is auto-resolved before reaching this step"
 

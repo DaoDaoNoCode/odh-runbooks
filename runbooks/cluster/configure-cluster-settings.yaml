@@ -143,6 +143,10 @@ steps:
           -n redhat-ods-applications
       ─────────────────────────────────────────────────────
 
+source_repos:
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+  - "https://github.com/opendatahub-io/odh-dashboard"
+
 known_bad_patterns:
   - "never set CULL_IDLE_TIME below 15 — background notebook activity causes false idle detection"
   - "never increase pvcSize after workbenches are already created — existing PVCs are not resized"

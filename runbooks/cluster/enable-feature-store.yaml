@@ -158,6 +158,10 @@ steps:
         Body: {"features": ["view:field"], "entities": {"id": [1,2,3]}}
       ─────────────────────────────────────────────────────
 
+source_repos:
+  - "https://github.com/feast-dev/feast"
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+
 known_bad_patterns:
   - "never use sqlite online store in production — it doesn't support concurrent access"
   - "never run feast materialize without first running feast apply — registry must exist"

@@ -108,6 +108,11 @@ steps:
 
       MLflow UI: {{ mlflow_tracking_uri }}/#/models/{{ model_name }}
 
+source_repos:
+  - "https://github.com/mlflow/mlflow"
+  - "https://github.com/kubeflow/model-registry"
+  - "https://github.com/opendatahub-io/odh-dashboard"
+
 known_bad_patterns:
   - "never promote a model that hasn't been validated in Staging — always test first"
   - "never use archive_existing_versions=false if you want clean single-version Production"

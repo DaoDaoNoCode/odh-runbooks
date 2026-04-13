@@ -227,6 +227,10 @@ steps:
         - Create GPU workbench: odh run workbenches/create-workbench-gpu
         - Deploy LLM: odh run model-serving/deploy-vllm-model
 
+source_repos:
+  - "https://github.com/NVIDIA/gpu-operator"
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+
 known_bad_patterns:
   - "never install the GPU Operator without first installing NFD — the operator will not know which nodes have GPUs"
   - "never install GPU Operator on a cluster with no GPU nodes — the ClusterPolicy will stay in 'notReady' forever"

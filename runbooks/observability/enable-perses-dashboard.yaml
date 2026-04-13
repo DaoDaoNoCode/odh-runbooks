@@ -202,6 +202,11 @@ steps:
         oc port-forward svc/perses 8080:8080 -n perses-system
         http://localhost:8080
 
+source_repos:
+  - "https://github.com/perses/perses"
+  - "https://github.com/perses/perses-operator"
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+
 known_bad_patterns:
   - "never name dashboards outside the data-science-{component}-{purpose} convention — it breaks the operator"
   - "never use Grafana — ODH standardized on Perses (ADR-Operator-0011)"

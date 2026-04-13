@@ -115,6 +115,10 @@ steps:
         - Deploy a model: odh run model-serving/deploy-kserve-model -p project_namespace=<ns> -p model_uri=<uri>
         - Dashboard: Projects → <your-project> → Models and model servers
 
+source_repos:
+  - "https://github.com/opendatahub-io/opendatahub-operator"
+  - "https://github.com/kserve/kserve"
+
 known_bad_patterns:
   - "never enable KServe with Serverless mode without first installing OpenShift Service Mesh and Serverless — it will fail silently"
   - "never delete the InferenceService CRD manually — it will break all deployed models"

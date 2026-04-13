@@ -206,14 +206,32 @@ steps:
           echo "[$i/24] Waiting for status.url to be populated..."
           sleep 5
         done
-        echo "WARNING: status.url not set after 2 minutes — dashboard BFF may not find this instance"
-        echo "Check: oc get evalhub {{ evalhub_instance_name }} -n {{ project_namespace }} -o jsonpath='{.status}'"
+        # status.url not set — operator bug or older version.
+        # Manually patch it so the dashboard BFF can find the service.
+        # The service name follows: evalhub-instance.<namespace>.svc.cluster.local:8443
+        PATCH_URL="https://{{ evalhub_instance_name }}.{{ project_namespace }}.svc.cluster.local:8443"
+        echo "status.url not set by operator — patching manually: $PATCH_URL"
+        oc patch evalhub {{ evalhub_instance_name }} -n {{ project_namespace }} \
+          --type=merge --subresource=status \
+          -p "{\"status\":{\"url\":\"$PATCH_URL\"}}" 2>/dev/null || \
+          echo "Patch failed — may need cluster-admin. Check operator version."
+        echo "done"
       store_as: evalhub_status_url
     post_check:
-      command: "echo ok"
+      command: |
+        URL=$(oc get evalhub {{ evalhub_instance_name }} -n {{ project_namespace }} \
+          -o jsonpath='{.status.url}' 2>/dev/null)
+        [ -n "$URL" ] && echo "ok" || echo "status.url-empty"
       expected: "ok"
-      timeout: "10s"
+      timeout: "30s"
       on_fail: STOP
+    on_fail_hint: >
+      status.url is still empty after patching. Check operator logs:
+      oc logs -n redhat-ods-applications -l control-plane=controller-manager --tail=20 | grep -i evalhub
+      The eval-hub BFF cannot reach the EvalHub without this field set.
+      Manual patch: oc patch evalhub {{ evalhub_instance_name }} -n {{ project_namespace }}
+        --type=merge --subresource=status
+        -p '{"status":{"url":"https://{{ evalhub_instance_name }}.{{ project_namespace }}.svc.cluster.local:8443"}}'
 
   - id: verify-evalhub-dashboard-visibility
     confidence: doc-derived

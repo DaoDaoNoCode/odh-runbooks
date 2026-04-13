@@ -1,9 +1,13 @@
 name: model-serving-create-custom-runtime
 description: >
   Create a custom KServe ServingRuntime for model formats not supported by default runtimes.
-  ServingRuntime defines: container image, supported model formats, protocol versions, resources.
-  Single-model runtimes (multiModel: false) are used for dedicated model servers.
-  Multi-model runtimes (multiModel: true) share one server across multiple models (ModelMesh).
+  From dashboard source (packages/kserve/src/deployServer.ts createServingRuntime):
+  - opendatahub.io/dashboard: true label REQUIRED
+  - openshift.io/display-name annotation REQUIRED
+  - opendatahub.io/template-name annotation REQUIRED (dashboard always sets it)
+  - opendatahub.io/template-display-name annotation REQUIRED (dashboard always sets it)
+  - shm emptyDir volume REQUIRED in containers
+  ServingRuntime is ALWAYS created per-namespace when deploying a model in the dashboard.
 rhoai_version_tested: null
 confidence_overall: doc-derived
 
@@ -78,6 +82,7 @@ steps:
             opendatahub.io/dashboard: "true"
           annotations:
             openshift.io/display-name: "{{ runtime_name }}"
+            opendatahub.io/template-name: "{{ runtime_name }}"
             opendatahub.io/template-display-name: "Custom ServingRuntime"
         spec:
           multiModel: false

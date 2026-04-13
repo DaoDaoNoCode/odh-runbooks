@@ -1,11 +1,18 @@
 name: model-serving-deploy-vllm-model
 description: >
-  Deploy an LLM using vLLM serving runtime on KServe.
-  vLLM is the recommended runtime for LLMs on RHOAI — it supports continuous batching,
-  paged attention, and OpenAI-compatible API (/v1/chat/completions).
-  Requires a GPU node. Model must be in HuggingFace format on S3 or HuggingFace Hub.
+  Deploy an LLM using vLLM serving runtime on KServe RawDeployment mode.
+  Matches what the ODH dashboard creates (packages/kserve/src/deployModel.ts).
+
+  KEY FACTS from dashboard source:
+  - model-type annotation is ALWAYS 'Generative' for LLMs (not Predictive)
+  - opendatahub.io/connections and opendatahub.io/connection-path are ALWAYS set
+  - security.opendatahub.io/enable-auth: defaults to false (must be explicit)
+  - ServingRuntime needs opendatahub.io/template-name + opendatahub.io/template-display-name
+  - Resources path: spec.predictor.model.resources (NOT spec.predictor.resources)
+  - shm emptyDir volume MUST be present in ServingRuntime containers
+  - Supports model args via spec.predictor.model.args
 rhoai_version_tested: null
-confidence_overall: inferred
+confidence_overall: doc-derived
 
 parameters:
   - name: project_namespace
@@ -15,72 +22,79 @@ parameters:
     hint: "Must be an ODH Data Science Project"
     example: "my-data-science-project"
   - name: model_name
-    description: Name for the InferenceService (shown in dashboard)
+    description: Name for the InferenceService
     required: true
     example: "llama3-8b"
-    hint: "Lowercase letters, numbers, hyphens only. Max 63 chars. This becomes the Kubernetes resource name."
+    hint: "Lowercase letters, numbers, hyphens only. Max 63 chars."
   - name: model_uri
     description: Path within the S3 bucket to the model weights directory
     required: true
     example: "models/llama3-8b"
-    hint: "PATH within the bucket only (not the full s3:// URL). The S3 connection provides the bucket/credentials. For HuggingFace models, first download to S3."
+    hint: "PATH within the bucket only. The S3 connection provides bucket/credentials."
   - name: s3_connection_name
     description: S3 connection secret name in the project
     required: false
     default: ""
     discover_cmd: "oc get secret -n {project_namespace} -l opendatahub.io/connection-type=s3 --no-headers -o jsonpath='{.items[*].metadata.name}' 2>/dev/null"
-    hint: "Leave empty to auto-discover the first S3 connection in the namespace"
+    hint: "Leave empty to auto-discover. Used as storage.key in spec."
   - name: gpu_count
-    description: "Number of GPUs (use >1 for tensor parallelism with large models)"
+    description: "Number of GPUs to request"
     required: false
     default: "1"
     enum: ["1", "2", "4", "8"]
-    hint: "g4dn.2xlarge=1 GPU, g4dn.12xlarge=4 GPUs, g5.12xlarge=4 GPUs. Must match your node type."
+    hint: "Must match available GPU node capacity"
   - name: memory_request
-    description: "Memory request. Rule of thumb: ~2x model size (7B model ≈ 16Gi, 70B model ≈ 140Gi)"
+    description: "Memory request — rule of thumb: 2x model size in GB"
     required: false
     default: "24Gi"
-    hint: "For Llama 3 8B: 16-24Gi. For Llama 3 70B: 140Gi (needs multiple GPUs)."
+    hint: "Llama 3 8B: 16-24Gi. Llama 3 70B: 140Gi (needs multiple GPUs)."
     example: "24Gi"
+  - name: cpu_request
+    description: CPU request for the model server
+    required: false
+    default: "4"
   - name: max_model_len
     description: Maximum context window length in tokens
     required: false
     default: "4096"
-    hint: "Reduce if you get CUDA OOM errors. Common values: 2048, 4096, 8192, 16384."
+    hint: "Reduce if you get CUDA OOM errors. Common values: 2048, 4096, 8192."
+  - name: min_replicas
+    description: Minimum replicas
+    required: false
+    default: "1"
 
 steps:
-  - id: check-gpu-available
-    confidence: inferred
-    description: Verify GPU nodes are available
+  - id: check-prerequisites
+    confidence: doc-derived
+    description: Verify KServe, GPU, namespace, and S3 connection prerequisites
     requires:
       - type: kserve-enabled
       - type: namespace
         name: "{{ project_namespace }}"
       - type: gpu-available
         can_auto_resolve: false
-        blocker_message: "GPU nodes required for vLLM. Run: odh run gpu/add-gpu-node-ocm"
+        blocker_message: "GPU nodes required for vLLM. Run: odh run rosa/setup-gpu-machinepool"
       - type: gpu-operator-installed
       - type: s3-connection
         namespace: "{{ project_namespace }}"
-    pre_check:
-      command: "oc get nodes -o jsonpath='{.items[*].status.allocatable.nvidia\\.com/gpu}' | tr ' ' '\\n' | grep -v '^0$' | grep -v '^$' | wc -l | tr -d ' '"
-      expected_min: 1
-      on_fail: STOP
     action:
       type: none
     post_check:
-      command: "oc get nodes -o jsonpath='{.items[*].status.allocatable.nvidia\\.com/gpu}' | tr ' ' '\\n' | grep -v '^0$' | grep -v '^$' | wc -l | tr -d ' '"
+      command: "oc get crd inferenceservices.serving.kserve.io --no-headers 2>/dev/null | wc -l | tr -d ' '"
       expected_min: 1
       timeout: "10s"
       on_fail: STOP
 
   - id: create-vllm-serving-runtime
-    confidence: inferred
+    confidence: doc-derived
     description: >
       Create vLLM ServingRuntime matching the dashboard format.
-      REQUIRED: opendatahub.io/dashboard=true label for dashboard visibility.
-      REQUIRED: openshift.io/display-name annotation (dashboard always sets it).
-      REQUIRED: /dev/shm volume with 2Gi Memory (dashboard always injects this).
+      From dashboard source (packages/kserve/src/deployServer.ts):
+      - opendatahub.io/template-name annotation REQUIRED (createServingRuntime sets it)
+      - opendatahub.io/template-display-name annotation REQUIRED
+      - opendatahub.io/dashboard: true label REQUIRED for dashboard visibility
+      - openshift.io/display-name annotation REQUIRED
+      - shm emptyDir volume REQUIRED (dashboard always injects it)
     pre_check:
       command: "oc get servingruntime vllm-runtime -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
       expected: "1"
@@ -99,10 +113,14 @@ steps:
             opendatahub.io/dashboard: "true"
           annotations:
             openshift.io/display-name: "vLLM"
+            opendatahub.io/template-name: "vllm-runtime"
             opendatahub.io/template-display-name: "vLLM ServingRuntime for KServe"
         spec:
-          builtInAdapter:
-            serverType: ovms
+          multiModel: false
+          supportedModelFormats:
+            - name: vllm
+              version: "1"
+              autoSelect: true
           containers:
             - name: kserve-container
               image: quay.io/opendatahub/vllm:stable
@@ -116,28 +134,21 @@ steps:
                 - "--served-model-name={{ model_name }}"
                 - "--max-model-len={{ max_model_len }}"
                 - "--tensor-parallel-size={{ gpu_count }}"
-              env:
-                - name: HF_HOME
-                  value: /tmp/hf_home
               ports:
                 - containerPort: 8080
                   protocol: TCP
               resources:
                 requests:
-                  cpu: "4"
+                  cpu: "{{ cpu_request }}"
                   memory: "{{ memory_request }}"
                   nvidia.com/gpu: "{{ gpu_count }}"
                 limits:
-                  cpu: "8"
+                  cpu: "{{ cpu_request }}"
                   memory: "{{ memory_request }}"
                   nvidia.com/gpu: "{{ gpu_count }}"
               volumeMounts:
-                - mountPath: /dev/shm
-                  name: shm
-          multiModel: false
-          supportedModelFormats:
-            - autoSelect: true
-              name: vllm
+                - name: shm
+                  mountPath: /dev/shm
           volumes:
             - name: shm
               emptyDir:
@@ -150,11 +161,13 @@ steps:
       on_fail: STOP
     rollback: "oc delete servingruntime vllm-runtime -n {{ project_namespace }}"
 
-  - id: deploy-vllm-inference-service
-    confidence: inferred
+  - id: create-vllm-inference-service
+    confidence: doc-derived
     description: >
-      Create InferenceService for vLLM matching EXACTLY what dashboard creates.
-      All required labels/annotations: dashboard=true, display-name, RawDeployment mode.
+      Create InferenceService for vLLM with ALL required annotations from dashboard source.
+      model-type is 'Generative' for LLMs (confirmed from dashboard source).
+      opendatahub.io/connections and connection-path are set by applyConnectionData.
+      Resources at spec.predictor.model.resources (confirmed from hardware.ts).
     pre_check:
       command: "oc get inferenceservice {{ model_name }} -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
       expected: "1"
@@ -172,15 +185,29 @@ steps:
           labels:
             opendatahub.io/dashboard: "true"
           annotations:
-            serving.kserve.io/deploymentMode: RawDeployment
             openshift.io/display-name: "{{ model_name }}"
+            openshift.io/description: ""
+            opendatahub.io/model-type: "Generative"
+            opendatahub.io/connections: "{{ s3_connection_name }}"
+            opendatahub.io/connection-path: "{{ model_uri }}"
+            security.opendatahub.io/enable-auth: "false"
+            serving.kserve.io/deploymentMode: RawDeployment
         spec:
           predictor:
-            minReplicas: 1
+            minReplicas: {{ min_replicas }}
             model:
               modelFormat:
                 name: vllm
               runtime: vllm-runtime
+              resources:
+                requests:
+                  cpu: "{{ cpu_request }}"
+                  memory: "{{ memory_request }}"
+                  nvidia.com/gpu: "{{ gpu_count }}"
+                limits:
+                  cpu: "{{ cpu_request }}"
+                  memory: "{{ memory_request }}"
+                  nvidia.com/gpu: "{{ gpu_count }}"
               storage:
                 key: "{{ s3_connection_name }}"
                 path: "{{ model_uri }}"
@@ -193,8 +220,8 @@ steps:
     rollback: "oc delete inferenceservice {{ model_name }} -n {{ project_namespace }}"
 
   - id: get-vllm-endpoint
-    confidence: inferred
-    description: Get the OpenAI-compatible endpoint URL
+    confidence: doc-derived
+    description: Get the OpenAI-compatible endpoint URL from status.url
     action:
       type: query
       command: "oc get inferenceservice {{ model_name }} -n {{ project_namespace }} -o jsonpath='{.status.url}'"
@@ -208,30 +235,31 @@ steps:
     return: |
       ✓ vLLM model deployed: {{ model_name }}
 
-      Endpoint:          {{ model_url }}
-      OpenAI-compatible: {{ model_url }}/v1/chat/completions
+      Model type: Generative (LLM)
+      GPUs:       {{ gpu_count }}x nvidia.com/gpu
+      Endpoint:   {{ model_url }}
 
-      Test it:
+      OpenAI-compatible API:
         curl -X POST {{ model_url }}/v1/chat/completions \
           -H "Content-Type: application/json" \
           -d '{"model": "{{ model_name }}", "messages": [{"role": "user", "content": "Hello!"}]}'
 
       Dashboard: Projects → {{ project_namespace }} → Models and model servers
-      GenAI Playground: odh run genai/connect-model-to-playground -p model_url={{ model_url }}
+
+      Annotations set (matching dashboard source):
+        opendatahub.io/model-type: Generative
+        opendatahub.io/connections: {{ s3_connection_name }}
+        opendatahub.io/connection-path: {{ model_uri }}
 
 known_bad_patterns:
-  - "never omit the shm volume — vLLM requires shared memory for tensor parallelism"
+  - "CRITICAL: model-type must be 'Generative' for LLMs — never use 'Predictive' for vLLM deployments"
+  - "CRITICAL: resources must be at spec.predictor.model.resources, not spec.predictor.resources"
+  - "CRITICAL: ServingRuntime must have opendatahub.io/template-name and opendatahub.io/template-display-name annotations"
+  - "never omit the shm emptyDir volume in ServingRuntime — dashboard always injects it"
+  - "never omit opendatahub.io/connections annotation — dashboard reads it to link to connection"
   - "never set tensor-parallel-size higher than gpu_count — vLLM will fail to start"
-  - "never set max-model-len higher than the model's actual maximum context — model will fail to load"
-  - "never deploy an LLM without GPU — CPU inference with vLLM is not supported in this configuration"
-  - "never use the kserve-container image without checking the vLLM version — older versions may not support the model architecture"
+  - "never deploy without GPU — CPU inference with vLLM is not supported"
 
 rollback_order:
   - "oc delete inferenceservice {{ model_name }} -n {{ project_namespace }}"
   - "oc delete servingruntime vllm-runtime -n {{ project_namespace }}"
-
-tags: ["llm","gpu","genai"]
-estimated_minutes: 15
-next_steps:
-  - "Test endpoint: odh run model-serving/test-model-endpoint"
-  - "Connect to GenAI playground: odh wizard genai/enable-chat-playground"

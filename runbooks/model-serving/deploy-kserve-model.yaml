@@ -1,12 +1,18 @@
 name: model-serving-deploy-kserve-model
 description: >
   Deploy a model using KServe InferenceService in RawDeployment mode.
-  Matches EXACTLY what the ODH dashboard creates:
+  Matches EXACTLY what the ODH dashboard creates (from packages/kserve/src/deployModel.ts):
   - Label: opendatahub.io/dashboard=true (required for dashboard listing)
-  - Annotation: openshift.io/display-name (required, dashboard always sets it)
-  - Annotation: serving.kserve.io/deploymentMode=RawDeployment (dashboard only supports RawDeployment)
-  - Storage: uses storage.key/path (NOT storageUri) when using an ODH S3 connection
-  - Dashboard only supports RawDeployment — Serverless is not available in dashboard UI
+  - Annotation: openshift.io/display-name (always set by applyDisplayNameDesc)
+  - Annotation: openshift.io/description (always set, empty string if none)
+  - Annotation: opendatahub.io/model-type (Generative|Predictive — always set)
+  - Annotation: opendatahub.io/connections (connection secret name — set by applyConnectionData)
+  - Annotation: opendatahub.io/connection-path (S3 path — set by applyConnectionData)
+  - Annotation: security.opendatahub.io/enable-auth (auth flag — set by applyAuth)
+  - Annotation: serving.kserve.io/deploymentMode=RawDeployment
+  - Storage: spec.predictor.model.storage.key + storage.path (NOT storageUri for S3)
+  - Resources: spec.predictor.model.resources (NOT spec.predictor.resources)
+  Dashboard only supports RawDeployment mode.
 rhoai_version_tested: null
 confidence_overall: doc-derived
 
@@ -14,35 +20,57 @@ parameters:
   - name: project_namespace
     description: Project namespace
     required: true
+    discover_cmd: "oc get namespace -l opendatahub.io/dashboard=true --no-headers -o jsonpath='{.items[*].metadata.name}'"
+    hint: "Must be an ODH Data Science Project"
+    example: "my-data-science-project"
   - name: model_name
-    description: Name for the InferenceService (lowercase, hyphens, max 63 chars)
+    description: Name for the InferenceService (shown in dashboard as display name)
     required: true
+    example: "my-sklearn-model"
+    hint: "Lowercase letters, numbers, hyphens only. Max 63 chars."
   - name: model_format
-    description: "Model format name: vllm | openvino_ir | onnx | sklearn | xgboost | pytorch | tensorflow"
+    description: "Model format name: openvino_ir | onnx | sklearn | xgboost | pytorch | tensorflow | vllm"
     required: true
+    enum: ["openvino_ir", "onnx", "sklearn", "xgboost", "pytorch", "tensorflow", "vllm"]
+    hint: "sklearn/xgboost/pytorch/tensorflow=Predictive, vllm=Generative"
   - name: model_uri
-    description: "Path within the S3 bucket to the model (e.g. models/my-model)"
+    description: Path within the S3 bucket to the model (the connection-path annotation value)
     required: true
+    example: "models/my-sklearn-model"
+    hint: "PATH within bucket only — not a full s3:// URI"
   - name: s3_connection_name
     description: Name of the S3 connection secret in the project
     required: true
+    discover_cmd: "oc get secret -n {project_namespace} -l opendatahub.io/connection-type=s3 --no-headers -o jsonpath='{.items[*].metadata.name}' 2>/dev/null"
+    hint: "The ODH connection secret name. Stored as storage.key in the spec."
+  - name: model_type
+    description: "Model type: Predictive (classical ML) or Generative (LLMs)"
+    required: false
+    default: Predictive
+    enum: ["Predictive", "Generative"]
+    hint: "sklearn/xgboost/onnx=Predictive, vllm=Generative. Stored in opendatahub.io/model-type annotation."
   - name: cpu_request
-    description: CPU request
+    description: CPU request (path: spec.predictor.model.resources.requests.cpu)
     required: false
     default: "1"
   - name: memory_request
-    description: Memory request
+    description: Memory request (path: spec.predictor.model.resources.requests.memory)
     required: false
     default: "4Gi"
   - name: min_replicas
-    description: Minimum replicas
+    description: Minimum replicas (spec.predictor.minReplicas)
     required: false
     default: "1"
+  - name: enable_auth
+    description: Enable token authentication
+    required: false
+    default: "false"
+    enum: ["true", "false"]
 
 steps:
-  - id: check-kserve-enabled
+  - id: check-prerequisites
     confidence: doc-derived
-    description: Verify KServe is enabled and S3 connection exists
+    description: Verify KServe is enabled, namespace and S3 connection exist
     requires:
       - type: kserve-enabled
       - type: namespace
@@ -64,10 +92,15 @@ steps:
   - id: create-inference-service
     confidence: doc-derived
     description: >
-      Create KServe InferenceService matching EXACTLY what the dashboard creates.
-      Uses storage.key/path (not storageUri) for S3 connection-based deployment.
-      Dashboard always sets RawDeployment mode and openshift.io/display-name annotation.
-      Model registry labels added so dashboard can link back to registry if needed.
+      Create KServe InferenceService matching EXACTLY what the dashboard creates
+      (assembleInferenceService in packages/kserve/src/deployModel.ts).
+      Key confirmed facts from source:
+      - opendatahub.io/model-type annotation is ALWAYS set (Generative|Predictive)
+      - opendatahub.io/connections = connection secret name (applyConnectionData)
+      - opendatahub.io/connection-path = S3 path (applyConnectionData)
+      - security.opendatahub.io/enable-auth = auth flag (applyAuth)
+      - resources are at spec.predictor.model.resources (NOT spec.predictor.resources)
+      - storage uses key+path, not storageUri for S3 connections
     pre_check:
       command: "oc get inferenceservice {{ model_name }} -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
       expected: "1"
@@ -86,6 +119,11 @@ steps:
             opendatahub.io/dashboard: "true"
           annotations:
             openshift.io/display-name: "{{ model_name }}"
+            openshift.io/description: ""
+            opendatahub.io/model-type: "{{ model_type }}"
+            opendatahub.io/connections: "{{ s3_connection_name }}"
+            opendatahub.io/connection-path: "{{ model_uri }}"
+            security.opendatahub.io/enable-auth: "{{ enable_auth }}"
             serving.kserve.io/deploymentMode: RawDeployment
         spec:
           predictor:
@@ -113,7 +151,7 @@ steps:
 
   - id: get-model-url
     confidence: doc-derived
-    description: Retrieve the model inference endpoint URL from status
+    description: Retrieve the inference endpoint URL from status.url
     action:
       type: query
       command: "oc get inferenceservice {{ model_name }} -n {{ project_namespace }} -o jsonpath='{.status.url}'"
@@ -127,27 +165,29 @@ steps:
     return: |
       ✓ Model deployed: {{ model_name }}
 
+      Type:     {{ model_type }}
       Format:   {{ model_format }}
       Endpoint: {{ model_url }}
 
       Dashboard: Projects → {{ project_namespace }} → Models and model servers → {{ model_name }}
 
-      Test:
+      Annotations set (matching dashboard source):
+        opendatahub.io/model-type: {{ model_type }}
+        opendatahub.io/connections: {{ s3_connection_name }}
+        opendatahub.io/connection-path: {{ model_uri }}
+        security.opendatahub.io/enable-auth: {{ enable_auth }}
+
+      Test inference (v2 protocol):
         curl -X POST {{ model_url }}/v2/models/{{ model_name }}/infer \
           -H "Content-Type: application/json" \
           -d '{"inputs": [{"name": "input", "shape": [1], "datatype": "FP32", "data": [1.0]}]}'
 
-      Notes:
-        - storage.key = name of the ODH S3 connection secret
-        - storage.path = path within the bucket (not full s3:// URI)
-        - storageUri would be used if NOT using an ODH connection secret
-
 known_bad_patterns:
-  - "CRITICAL: never omit openshift.io/display-name annotation — dashboard reads it to show model name"
-  - "CRITICAL: never omit opendatahub.io/dashboard=true label — model won't appear in dashboard"
+  - "CRITICAL: never omit opendatahub.io/model-type annotation — the dashboard always sets it and uses it for filtering"
+  - "CRITICAL: never omit opendatahub.io/connections — dashboard reads this to link models back to their connection"
+  - "CRITICAL: resources must be at spec.predictor.model.resources, NOT spec.predictor.resources"
   - "CRITICAL: never use Serverless deploymentMode — dashboard only supports RawDeployment"
-  - "never use both storageUri AND storage.key/path — they are mutually exclusive; dashboard deletes one when setting the other"
-  - "never omit serving.kserve.io/deploymentMode: RawDeployment — without it KServe may try Serverless mode"
+  - "never use both storageUri AND storage.key/path — they are mutually exclusive; dashboard removes one when setting the other"
 
 rollback_order:
   - "oc delete inferenceservice {{ model_name }} -n {{ project_namespace }}"

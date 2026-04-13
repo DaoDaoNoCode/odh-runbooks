@@ -1,55 +1,138 @@
 name: model-serving-deploy-llmd-model
 description: >
-  Deploy an LLM using LLM-D (llm-d-inference-scheduler) for optimized routing.
-  LLM-D provides prefix-cache-aware routing and queue-aware load balancing.
-  Uses Kubernetes Gateway API + Envoy ext-proc for intelligent request scheduling.
-  Different from plain vLLM/KServe — adds multi-pod routing intelligence.
-  Requires: Helmfile, GPU nodes, HuggingFace token for model download.
+  Deploy an LLM using LLM-D (LLMInferenceService CRD) for optimized distributed inference.
+  SOURCE: packages/llmd-serving in odh-dashboard.
+
+  CRITICAL DISTINCTION from standard KServe:
+  LLM-D uses a COMPLETELY DIFFERENT CRD — NOT InferenceService (v1beta1).
+  It uses: serving.kserve.io/v1alpha1 LLMInferenceService
+
+  Key differences from standard KServe deploy-vllm-model:
+  - CRD: LLMInferenceService (not InferenceService)
+  - Model spec: spec.model.uri (not spec.predictor.model.storage)
+  - Routing: spec.router.gateway (Gateway-based, not IngressClass)
+  - Auth: ENABLED BY DEFAULT (not disabled like standard KServe)
+  - Auth creates RBAC: Role + ServiceAccount + RoleBinding + Secret
+  - Pod label: app.kubernetes.io/component=llminferenceservice-workload
+  - No external route option (disabled in llmd-serving package)
+  - No deployment strategy option (disabled in llmd-serving package)
+
+  LLM-D provides prefix-cache-aware routing and queue-aware load balancing
+  across multiple vLLM pods for better latency at scale.
+
+  PREREQUISITE: An LLM-D Gateway must exist in the cluster.
+  The llm-d-inference-scheduler must be deployed separately.
 rhoai_version_tested: null
-confidence_overall: uncertain
+confidence_overall: inferred
 
 parameters:
-  - name: model_namespace
-    description: Namespace to deploy LLM-D into
-    required: false
-    default: llm-d
-  - name: model_name
-    description: HuggingFace model ID (e.g. meta-llama/Meta-Llama-3-8B)
+  - name: project_namespace
+    description: Namespace to deploy the LLMInferenceService into
     required: true
+    discover_cmd: "oc get namespace -l opendatahub.io/dashboard=true --no-headers -o jsonpath='{.items[*].metadata.name}'"
+    hint: "Must be an ODH Data Science Project"
+    example: "llm-serving"
+  - name: model_name
+    description: Name for the LLMInferenceService
+    required: true
+    example: "llama3-8b-llmd"
+    hint: "Lowercase letters, numbers, hyphens. Max 63 chars."
+  - name: model_uri
+    description: "Model URI — can be HuggingFace hub ID or S3 path"
+    required: true
+    example: "Qwen/Qwen2.5-7B-Instruct"
+    hint: "HuggingFace model ID (ungated models work without HF token) or s3://bucket/path"
+  - name: gateway_name
+    description: Name of the LLM-D Gateway to route through
+    required: true
+    discover_cmd: "oc get gateway -A --no-headers -o jsonpath='{range .items[*]}{.metadata.name}{\" \"}{.metadata.namespace}{\"\\n\"}{end}' 2>/dev/null"
+    hint: "Must be an existing Gateway resource. Deploy llm-d-inference-scheduler first."
+    example: "llm-d-gateway"
+  - name: gateway_namespace
+    description: Namespace where the Gateway lives
+    required: false
+    default: "{{ project_namespace }}"
+  - name: gpu_count
+    description: Number of GPUs per replica
+    required: false
+    default: "1"
+    enum: ["1", "2", "4", "8"]
+  - name: memory_request
+    description: Memory request per pod
+    required: false
+    default: "24Gi"
   - name: num_replicas
-    description: Number of vLLM replicas for load balancing
+    description: "Number of vLLM replicas (>1 activates LLM-D scheduling intelligence)"
     required: false
     default: "2"
+    hint: "LLM-D's routing intelligence only activates with >= 2 replicas"
   - name: hf_token_secret
-    description: Name of secret containing HF_TOKEN
-    required: true
+    description: "Kubernetes secret name containing HF_TOKEN (required for gated models like Llama)"
+    required: false
+    default: ""
+    hint: "Leave empty for ungated models (Qwen, Mistral, etc.). Create with: oc create secret generic hf-token --from-literal=HF_TOKEN=hf_xxx"
 
 steps:
   - id: check-prerequisites
-    confidence: uncertain
-    description: Check Gateway API CRDs and Helmfile are available
+    confidence: inferred
+    description: Verify LLMInferenceService CRD exists (llm-d-inference-scheduler must be deployed)
     requires:
       - type: openshift-cluster
       - type: gpu-available
         can_auto_resolve: false
         blocker_message: "LLM-D requires GPU nodes. Run: odh run rosa/setup-gpu-machinepool"
+      - type: namespace
+        name: "{{ project_namespace }}"
     pre_check:
-      command: "oc get crd gateways.gateway.networking.k8s.io --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      command: "oc get crd llminferenceservices.serving.kserve.io --no-headers 2>/dev/null | wc -l | tr -d ' '"
       expected_min: 1
       on_fail: STOP
     action:
       type: none
     post_check:
-      command: "which helmfile > /dev/null 2>&1 && echo ok || echo missing"
-      expected: "ok"
+      command: "oc get crd llminferenceservices.serving.kserve.io --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
       timeout: "10s"
       on_fail: STOP
+    on_fail_hint: >
+      LLMInferenceService CRD not found. The llm-d-inference-scheduler must be deployed first.
+      This is typically deployed via the ODH operator with llmd-serving component enabled,
+      or via Helmfile from the llm-d-inference-scheduler repo.
 
-  - id: create-llmd-namespace
-    confidence: doc-derived
-    description: Create LLM-D deployment namespace
+  - id: check-gateway-exists
+    confidence: inferred
+    description: Verify the specified Gateway exists
     pre_check:
-      command: "oc get namespace {{ model_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      command: "oc get gateway {{ gateway_name }} -n {{ gateway_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      on_fail: STOP
+    action:
+      type: none
+    post_check:
+      command: "oc get gateway {{ gateway_name }} -n {{ gateway_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "10s"
+      on_fail: STOP
+    on_fail_hint: >
+      Gateway not found. List available gateways with:
+        oc get gateway -A
+      The llm-d-inference-scheduler deploys gateways automatically.
+      Check its deployment status first.
+
+  - id: create-llm-inference-service
+    confidence: inferred
+    description: >
+      Create LLMInferenceService — the LLM-D CRD (NOT standard KServe InferenceService).
+      From packages/llmd-serving dashboard source:
+      - apiVersion: serving.kserve.io/v1alpha1 (NOT v1beta1)
+      - spec.model.uri: direct model reference
+      - spec.router.gateway: Gateway-based routing (not Ingress)
+      - spec.replicas: number of vLLM pods
+      - Labels: dashboard.opendatahub.io/dashboard-resource=true (note: different from standard!)
+      - Auth enabled by default in llmd-serving package
+      - Pod label: app.kubernetes.io/component=llminferenceservice-workload
+    pre_check:
+      command: "oc get llminferenceservice {{ model_name }} -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
       expected: "1"
       if_already_true: skip
       on_fail: STOP
@@ -57,87 +140,92 @@ steps:
       type: apply
       dry_run: true
       manifest: |
-        apiVersion: v1
-        kind: Namespace
+        apiVersion: serving.kserve.io/v1alpha1
+        kind: LLMInferenceService
         metadata:
-          name: {{ model_namespace }}
+          name: {{ model_name }}
+          namespace: {{ project_namespace }}
           labels:
-            opendatahub.io/dashboard: "true"
+            dashboard.opendatahub.io/dashboard-resource: "true"
+          annotations:
+            openshift.io/display-name: "{{ model_name }}"
+            openshift.io/description: ""
+            security.opendatahub.io/enable-auth: "true"
+        spec:
+          model:
+            uri: "{{ model_uri }}"
+          router:
+            gateway:
+              name: {{ gateway_name }}
+              namespace: {{ gateway_namespace }}
+          replicas: {{ num_replicas }}
+          template:
+            containers:
+              - name: vllm
+                resources:
+                  requests:
+                    cpu: "4"
+                    memory: "{{ memory_request }}"
+                    nvidia.com/gpu: "{{ gpu_count }}"
+                  limits:
+                    memory: "{{ memory_request }}"
+                    nvidia.com/gpu: "{{ gpu_count }}"
     post_check:
-      command: "oc get namespace {{ model_namespace }} -o jsonpath='{.status.phase}'"
-      expected: "Active"
-      timeout: "30s"
+      command: "oc get llminferenceservice {{ model_name }} -n {{ project_namespace }} -o jsonpath='{.status.conditions[?(@.type==\"Ready\")].status}' 2>/dev/null"
+      expected: "True"
+      timeout: "900s"
+      poll_interval: "30s"
       on_fail: STOP
+    rollback: "oc delete llminferenceservice {{ model_name }} -n {{ project_namespace }}"
 
-  - id: configure-llmd-deployment
-    confidence: uncertain
-    description: >
-      LLM-D is deployed via Helmfile (not kubectl apply).
-      This step shows the configuration — run helmfile sync manually.
+  - id: get-llmd-endpoint
+    confidence: inferred
+    description: Get the LLM-D endpoint URL via the Gateway
     action:
-      type: none
+      type: query
+      command: |
+        # LLM-D exposes endpoint through the Gateway, not a direct route
+        GW_HOST=$(oc get gateway {{ gateway_name }} -n {{ gateway_namespace }} \
+          -o jsonpath='{.status.addresses[0].value}' 2>/dev/null)
+        if [ -n "$GW_HOST" ]; then
+          echo "http://$GW_HOST"
+        else
+          # Try to get the Gateway route
+          oc get route -n {{ gateway_namespace }} -l gateway={{ gateway_name }} \
+            -o jsonpath='{.items[0].spec.host}' 2>/dev/null | xargs -I{} echo "https://{}"
+        fi
+      store_as: llmd_endpoint
     post_check:
       command: "echo ok"
       expected: "ok"
-      timeout: "5s"
+      timeout: "15s"
       on_fail: STOP
     return: |
-      ⚠ LLM-D requires Helmfile deployment (not standard kubectl).
+      ✓ LLMInferenceService deployed: {{ model_name }}
 
-      STEP 1: Create HuggingFace token secret
-        oc create secret generic llm-d-hf-token \
-          --from-literal=HF_TOKEN=$HF_TOKEN \
-          -n {{ model_namespace }}
+      CRD:        serving.kserve.io/v1alpha1 LLMInferenceService
+      Replicas:   {{ num_replicas }} vLLM pods
+      Gateway:    {{ gateway_name }}.{{ gateway_namespace }}
+      Endpoint:   {{ llmd_endpoint }}
 
-      STEP 2: Create helmfile.yaml
-        helmFiles:
-          - path: llm-d-infra/helmfile.yaml
-            values:
-              - NAMESPACE: {{ model_namespace }}
-              - MODEL: {{ model_name }}
-              - REPLICAS: {{ num_replicas }}
-              - SCHEDULING_CONFIG: precise-prefix-cache-aware
-              - HF_TOKEN_SECRET: {{ hf_token_secret }}
-
-      STEP 3: Deploy
-        helmfile -f helmfile.yaml sync
-
-      STEP 4: Verify Gateway
-        oc get gateways -n {{ model_namespace }}
-        oc get httproutes -n {{ model_namespace }}
-        oc get pods -n {{ model_namespace }}
-
-      STEP 5: Test endpoint
-        GATEWAY_URL=$(oc get gateway -n {{ model_namespace }} \
-          -o jsonpath='{.items[0].status.addresses[0].value}')
-        curl -X POST http://$GATEWAY_URL/v1/chat/completions \
+      Test (once pods are ready):
+        curl -X POST {{ llmd_endpoint }}/v1/chat/completions \
           -H "Content-Type: application/json" \
-          -d '{"model": "{{ model_name }}", "messages": [{"role": "user", "content": "Hello"}]}'
+          -d '{"model": "{{ model_name }}", "messages": [{"role": "user", "content": "Hello!"}]}'
 
-      ─────────────────────────────────────────────────────
-      LLM-D SCHEDULING CONFIG OPTIONS:
-        precise-prefix-cache-aware  — Best for KV cache reuse (default)
-        queue-depth-aware           — Best for high concurrency
-        round-robin                 — Simple load balancing
+      LLM-D routing advantages (vs plain vLLM):
+        - Prefix-cache-aware: routes to pod that already has the KV cache for this prefix
+        - Queue-aware: routes to least-loaded pod
+        - Activates fully with {{ num_replicas }} replicas
 
-      HOW IT DIFFERS FROM PLAIN vLLM/KSERVE:
-        Plain vLLM: L4 load balancing, no context awareness
-        LLM-D:      Routes to pod that already has the KV cache for this prefix
-                    → 40-60% latency reduction for repeated context patterns
-
-      INTEGRATION WITH DASHBOARD:
-        Once deployed, add the Gateway URL as a model connection in ODH:
-        odh run genai/enable-chat-playground \
-          -p model_url=http://$GATEWAY_URL \
-          -p model_name={{ model_name }}
-      ─────────────────────────────────────────────────────
+      Dashboard: Projects → {{ project_namespace }} → Models and model servers
 
 known_bad_patterns:
-  - "never try to deploy LLM-D with kubectl apply — it requires Helmfile orchestration"
-  - "never run LLM-D without GPU nodes — vLLM only runs on GPU"
-  - "never set num_replicas=1 — LLM-D's routing intelligence only activates with 2+ replicas"
-  - "never deploy LLM-D without the Gateway API CRDs installed — the Gateway won't be created"
+  - "CRITICAL: LLMInferenceService uses a DIFFERENT CRD from standard InferenceService — do not confuse v1alpha1 LLMInferenceService with v1beta1 InferenceService"
+  - "CRITICAL: the label is dashboard.opendatahub.io/dashboard-resource (note: different prefix from standard opendatahub.io/dashboard)"
+  - "never set num_replicas=1 — LLM-D's routing intelligence only works with 2+ replicas"
+  - "never try to deploy LLM-D without a Gateway — the Gateway is mandatory, not optional"
+  - "never confuse this with plain vLLM on KServe — different CRD, different routing, different auth defaults"
 
 rollback_order:
-  - "helmfile -f helmfile.yaml destroy"
-  - "oc delete namespace {{ model_namespace }}"
+  - "oc delete llminferenceservice {{ model_name }} -n {{ project_namespace }}"

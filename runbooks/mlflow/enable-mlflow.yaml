@@ -341,6 +341,7 @@ steps:
 
 source_repos:
   - "https://github.com/opendatahub-io/mlflow-operator"
+  - "https://github.com/opendatahub-io/mlflow"
   - "https://github.com/mlflow/mlflow"
   - "https://github.com/opendatahub-io/opendatahub-operator"
   - "https://github.com/opendatahub-io/odh-dashboard"

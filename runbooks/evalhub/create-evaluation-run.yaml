@@ -565,6 +565,7 @@ source_repos:
   - "https://github.com/trustyai-explainability/trustyai-service-operator"
   - "https://github.com/opendatahub-io/trustyai-explainability"
   - "https://github.com/kserve/kserve"
+  - "https://github.com/opendatahub-io/kserve"
   - "https://github.com/opendatahub-io/opendatahub-operator"
 
 tags: ["evalhub", "mlflow", "model-serving", "trustyai"]

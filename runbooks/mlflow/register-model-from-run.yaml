@@ -140,6 +140,7 @@ steps:
         odh run mlflow/promote-model-to-production -p model_name={{ model_name }} -p version={{ model_version.model_version.version }}
 
 source_repos:
+  - "https://github.com/opendatahub-io/mlflow"
   - "https://github.com/mlflow/mlflow"
   - "https://github.com/kubeflow/model-registry"
   - "https://github.com/opendatahub-io/odh-dashboard"

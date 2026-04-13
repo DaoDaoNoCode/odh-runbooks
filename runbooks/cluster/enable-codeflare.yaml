@@ -136,6 +136,8 @@ steps:
 
 source_repos:
   - "https://github.com/project-codeflare/codeflare-operator"
+  - "https://github.com/ray-project/kuberay"
+  - "https://github.com/opendatahub-io/kuberay"
   - "https://github.com/project-codeflare/codeflare-sdk"
   - "https://github.com/kubernetes-sigs/kueue"
   - "https://github.com/opendatahub-io/opendatahub-operator"

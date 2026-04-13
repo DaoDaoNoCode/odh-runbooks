@@ -235,6 +235,8 @@ source_repos:
   - "https://github.com/project-codeflare/codeflare-operator"
   - "https://github.com/project-codeflare/codeflare-sdk"
   - "https://github.com/ray-project/ray"
+  - "https://github.com/ray-project/kuberay"
+  - "https://github.com/opendatahub-io/kuberay"
   - "https://github.com/kubernetes-sigs/kueue"
   - "https://github.com/project-codeflare/appwrapper"
   - "https://github.com/opendatahub-io/opendatahub-operator"

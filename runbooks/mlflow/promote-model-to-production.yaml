@@ -109,6 +109,7 @@ steps:
       MLflow UI: {{ mlflow_tracking_uri }}/#/models/{{ model_name }}
 
 source_repos:
+  - "https://github.com/opendatahub-io/mlflow"
   - "https://github.com/mlflow/mlflow"
   - "https://github.com/kubeflow/model-registry"
   - "https://github.com/opendatahub-io/odh-dashboard"

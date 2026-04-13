@@ -232,6 +232,7 @@ source_repos:
   - "https://github.com/opendatahub-io/model-registry-operator"
   - "https://github.com/kubeflow/model-registry"
   - "https://github.com/kserve/kserve"
+  - "https://github.com/opendatahub-io/kserve"
   - "https://github.com/opendatahub-io/odh-model-controller"
   - "https://github.com/opendatahub-io/odh-dashboard"
 

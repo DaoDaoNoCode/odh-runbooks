@@ -222,6 +222,7 @@ steps:
 
 source_repos:
   - "https://github.com/kserve/kserve"
+  - "https://github.com/opendatahub-io/kserve"
   - "https://github.com/opendatahub-io/odh-model-controller"
   - "https://github.com/opendatahub-io/opendatahub-operator"
   - "https://github.com/opendatahub-io/odh-dashboard"

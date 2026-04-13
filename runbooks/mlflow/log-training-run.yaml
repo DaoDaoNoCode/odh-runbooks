@@ -173,6 +173,7 @@ steps:
         odh run mlflow/register-model-from-run -p run_id={{ run.info.run_id }}
 
 source_repos:
+  - "https://github.com/opendatahub-io/mlflow"
   - "https://github.com/mlflow/mlflow"
   - "https://github.com/opendatahub-io/odh-dashboard"
 

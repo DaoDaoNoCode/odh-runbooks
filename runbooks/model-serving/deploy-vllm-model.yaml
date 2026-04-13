@@ -210,11 +210,15 @@ steps:
 
       GPU: references built-in "vLLM NVIDIA GPU ServingRuntime for KServe" (do NOT create it)
         args: --chat-template=/opt/app-root/template/... (GPU-specific path)
-        Remove --enable-chunked-prefill for T4 GPUs
+        --enable-chunked-prefill: INCLUDE when enable_chunked_prefill=true (default), OMIT when false.
+        This flag causes inference failures on NVIDIA T4 and older GPUs (see vllm#2729).
 
       CPU (EXPERIMENTAL): references vllm-cpu-runtime-amd64 (created in previous step)
         args: --chat-template=/workspace/vllm/examples/... (CPU-specific path — DIFFERENT!)
         Performance: ~3 tokens/s, not for production
+
+      --served-model-name={{ model_name }} is always included so the model is addressable
+      by its InferenceService name (important for eval runners and dashboard).
 
       Model source: URI connection (oci:// storageUri) — no S3 needed
     pre_check:
@@ -261,6 +265,7 @@ steps:
                 - "--dtype=half"
                 - "--max-model-len={{ max_model_len }}"
                 - "--gpu-memory-utilization=0.95"
+                - "--served-model-name={{ model_name }}"
                 - "--enable-auto-tool-choice"
                 - "--tool-call-parser=llama3_json"
                 - "{{ '--chat-template=/opt/app-root/template/tool_chat_template_llama3.2_json.jinja' if accelerator == 'gpu' else '--chat-template=/workspace/vllm/examples/tool_chat_template_llama3.2_json.jinja' }}"

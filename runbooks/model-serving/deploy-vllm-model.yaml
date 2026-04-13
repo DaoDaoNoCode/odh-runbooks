@@ -246,8 +246,8 @@ steps:
             minReplicas: 1
             model:
               modelFormat:
-                name: vllm
-              runtime: "{{ 'vllm-cpu-runtime-amd64' if accelerator == 'cpu' else 'vllm-nvidia-gpu-runtime' }}"
+                name: vLLM
+              runtime: "{{ 'vllm-cpu-x86-runtime' if accelerator == 'cpu' else 'vllm-cuda-runtime' }}"
               storageUri: "{{ model_oci_uri }}"
               resources:
                 requests:

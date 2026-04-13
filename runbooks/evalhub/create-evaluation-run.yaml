@@ -188,6 +188,40 @@ steps:
       timeout: "30s"
       on_fail: STOP
 
+  # ── PHASE 3a: Create vLLM ServingRuntime from RHOAI template ────────────
+  # RHOAI stores runtimes as OpenShift Templates in redhat-ods-applications.
+  # The dashboard instantiates the template to create a namespace-scoped ServingRuntime.
+  # We must do the same — no ServingRuntime = "no runtime found" error from KServe.
+
+  - id: create-vllm-serving-runtime
+    confidence: doc-derived
+    description: >
+      Instantiate the vLLM CUDA ServingRuntime template from redhat-ods-applications.
+      RHOAI stores runtimes as Templates (not ClusterServingRuntimes).
+      Template 'vllm-cuda-runtime-template' creates 'vllm-cuda-runtime' ServingRuntime.
+      supportedModelFormats: [{name: vLLM}] — case-sensitive, must match InferenceService.
+    pre_check:
+      command: "oc get servingruntime vllm-cuda-runtime -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: query
+      command: |
+        oc process -n redhat-ods-applications vllm-cuda-runtime-template 2>/dev/null |           oc apply -n {{ project_namespace }} -f - 2>&1
+        echo "done"
+      store_as: runtime_result
+    post_check:
+      command: "oc get servingruntime vllm-cuda-runtime -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "30s"
+      on_fail: STOP
+    on_fail_hint: >
+      Template vllm-cuda-runtime-template not found in redhat-ods-applications.
+      Check: oc get template -n redhat-ods-applications | grep vllm
+      The template is created by the RHOAI operator when kserve is enabled.
+    rollback: "oc delete servingruntime vllm-cuda-runtime -n {{ project_namespace }} 2>/dev/null || true"
+
   # ── PHASE 3: Resolve model ────────────────────────────────────────────────
 
   - id: resolve-model
@@ -254,7 +288,8 @@ steps:
             minReplicas: 1
             model:
               modelFormat:
-                name: vllm
+                name: vLLM
+              runtime: vllm-cuda-runtime
               storageUri: "oci://{{ model_resolution | replace('DEPLOY:', '') }}"
               resources:
                 requests:

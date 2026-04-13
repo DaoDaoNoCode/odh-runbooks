@@ -71,8 +71,8 @@ parameters:
   - name: benchmark_provider
     description: Benchmark provider for the evaluation run
     required: false
-    default: lm-evaluation-harness
-    enum: ["lm-evaluation-harness", "garak"]
+    default: lm_evaluation_harness
+    enum: ["lm_evaluation_harness", "garak"]
     hint: "lm-evaluation-harness: accuracy benchmarks. garak: safety/red-teaming."
 
 steps:
@@ -106,20 +106,45 @@ steps:
       users cannot access the EvalHub API through the dashboard.
     pre_check:
       command: "oc get namespace {{ project_namespace }} --show-labels 2>/dev/null | grep -c evalhub || echo 0"
-      expected: "true"
+      expected: "1"
       if_already_true: skip
       on_fail: STOP
     action:
       type: query
       command: |
-        oc label namespace {{ project_namespace }}           evalhub.trustyai.opendatahub.io/tenant=true           --overwrite 2>&1
+        oc label namespace {{ project_namespace }} \
+          evalhub.trustyai.opendatahub.io/tenant=true \
+          --overwrite 2>&1
     post_check:
       command: "oc get namespace {{ project_namespace }} --show-labels 2>/dev/null | grep -c evalhub || echo 0"
-      expected: "true"
+      expected: "1"
       timeout: "15s"
       on_fail: STOP
 
   # ── PHASE 2: Create EvalHub instance ─────────────────────────────────────
+
+  - id: detect-mlflow-tracking-uri
+    confidence: doc-derived
+    description: >
+      Detect the MLflow tracking server URI so EvalHub can link evaluation jobs
+      to MLflow experiments. Without this, the 'experiment' field in job submission
+      is rejected and eval runs never appear in the dashboard.
+    action:
+      type: query
+      command: |
+        for ns in redhat-ods-applications opendatahub; do
+          if oc get service mlflow -n $ns 2>/dev/null | grep -q mlflow; then
+            echo "https://mlflow.${ns}.svc.cluster.local:8443"
+            exit 0
+          fi
+        done
+        echo ""
+      store_as: mlflow_tracking_uri
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
 
   - id: create-evalhub-cr
     confidence: doc-derived
@@ -143,13 +168,16 @@ steps:
         spec:
           replicas: 1
           providers:
-            - lm-evaluation-harness
+            - lm_evaluation_harness
             - garak
           collections:
             - leaderboard-v2
             - safety-and-fairness-v1
           database:
             type: sqlite
+          env:
+            - name: MLFLOW_TRACKING_URI
+              value: "{{ mlflow_tracking_uri }}"
     post_check:
       command: "oc get evalhub {{ evalhub_instance_name }} -n {{ project_namespace }} -o jsonpath='{.status.phase}' 2>/dev/null"
       expected: "Ready"
@@ -430,6 +458,10 @@ steps:
                 - "--dtype=half"
                 - "--max-model-len=8192"
                 - "--gpu-memory-utilization=0.95"
+                - "--served-model-name={{ model_name }}"
+              env:
+                - name: VLLM_CPU_KVCACHE_SPACE
+                  value: "2"
     post_check:
       command: "oc get inferenceservice {{ model_name }} -n {{ project_namespace }} -o jsonpath='{.status.modelStatus.states.activeModelState}' 2>/dev/null"
       expected: "Loaded"
@@ -565,6 +597,33 @@ steps:
 
   # ── PHASE 4: Create evaluation run ───────────────────────────────────────
 
+  - id: resolve-hf-tokenizer
+    confidence: doc-derived
+    description: >
+      Map the modelcar catalog tag to its HuggingFace tokenizer ID.
+      The lm-eval runner uses this to download the tokenizer for scoring.
+      The model is served by vLLM as '{{ model_name }}' (via --served-model-name),
+      but the tokenizer must be a valid HuggingFace model ID.
+    action:
+      type: query
+      command: |
+        case "{{ model_catalog_tag }}" in
+          granite-3.3-2b-instruct)   echo "ibm-granite/granite-3.3-2b-instruct" ;;
+          granite-3.3-8b-instruct)   echo "ibm-granite/granite-3.3-8b-instruct" ;;
+          granite-3.1-2b-instruct)   echo "ibm-granite/granite-3.1-2b-instruct" ;;
+          llama-3.2-1b-instruct)     echo "meta-llama/Llama-3.2-1B-Instruct" ;;
+          llama-3.2-3b-instruct)     echo "meta-llama/Llama-3.2-3B-Instruct" ;;
+          qwen2.5-0.5b-instruct)     echo "Qwen/Qwen2.5-0.5B-Instruct" ;;
+          *)                         echo "{{ model_catalog_tag }}" ;;
+        esac
+      store_as: hf_tokenizer_id
+    post_check:
+      assert: hf_tokenizer_id is not empty
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+
   - id: get-evalhub-route
     confidence: inferred
     description: Get the EvalHub service route
@@ -619,7 +678,10 @@ steps:
               "metric": "acc_norm",
               "lower_is_better": false
             },
-            "pass_criteria": { "threshold": 0.25 }
+            "pass_criteria": { "threshold": 0.25 },
+            "parameters": {
+              "tokenizer": "{{ hf_tokenizer_id }}"
+            }
           }],
           "experiment": {
             "name": "{{ mlflow_experiment_name }}",

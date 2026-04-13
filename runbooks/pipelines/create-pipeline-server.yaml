@@ -159,6 +159,8 @@ steps:
         metadata:
           name: {{ dspa_name }}
           namespace: {{ project_namespace }}
+          labels:
+            opendatahub.io/dashboard: "true"
         spec:
           apiServer:
             deploy: true

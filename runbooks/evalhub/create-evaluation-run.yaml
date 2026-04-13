@@ -98,6 +98,27 @@ steps:
       timeout: "10s"
       on_fail: STOP
 
+  - id: label-namespace-for-evalhub
+    confidence: doc-derived
+    description: >
+      Label the project namespace so the TrustyAI operator provisions the virtual
+      'evaluations' resource used for SAR auth checks. Without this label, non-admin
+      users cannot access the EvalHub API through the dashboard.
+    pre_check:
+      command: "oc get namespace {{ project_namespace }} --show-labels 2>/dev/null | grep -c evalhub || echo 0"
+      expected: "true"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: query
+      command: |
+        oc label namespace {{ project_namespace }}           evalhub.trustyai.opendatahub.io/tenant=true           --overwrite 2>&1
+    post_check:
+      command: "oc get namespace {{ project_namespace }} --show-labels 2>/dev/null | grep -c evalhub || echo 0"
+      expected: "true"
+      timeout: "15s"
+      on_fail: STOP
+
   # ── PHASE 2: Create EvalHub instance ─────────────────────────────────────
 
   - id: create-evalhub-cr
@@ -117,6 +138,8 @@ steps:
         metadata:
           name: {{ evalhub_instance_name }}
           namespace: {{ project_namespace }}
+          labels:
+            opendatahub.io/dashboard: "true"
         spec:
           replicas: 1
           providers:

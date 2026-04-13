@@ -333,9 +333,14 @@ steps:
       If eval-hub-ui sidecar is missing from dashboard pod: same root cause — overlay not applied.
   - id: create-evalhub-rbac
     confidence: doc-derived
-    description: Create RBAC roles for EvalHub and MLflow access
+    description: >
+      Grant the EvalHub cluster service account access to the user namespace.
+      The shared EvalHub in the ODH namespace runs eval jobs IN the user namespace
+      (creates ConfigMaps, Jobs, Pods there). The evalhub-service service account
+      must have edit access in the target namespace or jobs will fail with
+      "configmaps is forbidden" errors.
     pre_check:
-      command: "oc get role eval-hub-user-access -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      command: "oc get rolebinding evalhub-service-access -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
       expected: "1"
       if_already_true: skip
       on_fail: STOP
@@ -343,45 +348,26 @@ steps:
       type: apply
       dry_run: true
       manifest: |
-        apiVersion: v1
-        kind: ServiceAccount
-        metadata:
-          name: eval-hub-job
-          namespace: {{ project_namespace }}
-        ---
-        apiVersion: rbac.authorization.k8s.io/v1
-        kind: Role
-        metadata:
-          name: eval-hub-user-access
-          namespace: {{ project_namespace }}
-        rules:
-          - apiGroups: ["trustyai.opendatahub.io"]
-            resources: ["evaluations", "collections", "providers"]
-            verbs: ["get", "list", "create", "update", "patch", "delete"]
-          - apiGroups: ["trustyai.opendatahub.io"]
-            resources: ["status-events"]
-            verbs: ["create"]
-          - apiGroups: ["mlflow.kubeflow.org"]
-            resources: ["experiments"]
-            verbs: ["create", "update"]
-        ---
         apiVersion: rbac.authorization.k8s.io/v1
         kind: RoleBinding
         metadata:
-          name: eval-hub-user-access
+          name: evalhub-service-access
           namespace: {{ project_namespace }}
         subjects:
           - kind: ServiceAccount
-            name: eval-hub-job
-            namespace: {{ project_namespace }}
+            name: evalhub-service
+            namespace: redhat-ods-applications
+          - kind: ServiceAccount
+            name: evalhub-service
+            namespace: opendatahub
         roleRef:
           apiGroup: rbac.authorization.k8s.io
-          kind: Role
-          name: eval-hub-user-access
+          kind: ClusterRole
+          name: edit
     post_check:
-      command: "oc get role eval-hub-user-access -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      command: "oc get rolebinding evalhub-service-access -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
       expected: "1"
-      timeout: "30s"
+      timeout: "15s"
       on_fail: STOP
 
   # ── PHASE 3a: Create vLLM ServingRuntime from RHOAI template ────────────
@@ -775,16 +761,29 @@ steps:
 
   - id: wait-evaluation-complete
     confidence: doc-derived
-    description: Poll until evaluation completes or fails (max 30 minutes)
+    description: >
+      Poll the evaluation job until it completes, fails, or cancels.
+      NOTE: arc_easy has 9501 samples. On CPU at ~2s/sample this takes ~5-7 hours.
+      This step polls for up to 30 minutes then exits with the status URL so you
+      can check the dashboard later when it completes.
+      The dashboard row becomes clickable only when state=completed.
     action:
-      type: poll
-      url: "https://{{ evalhub_host }}/api/v1/evaluations/jobs/{{ eval_job.resource.id }}"
-      headers:
-        X-Tenant: "{{ project_namespace }}"
-        Authorization: "Bearer {{ oc_token }}"
-      until: "response.status.state in ['completed', 'failed', 'cancelled']"
-      timeout: "1800s"
-      poll_interval: "30s"
+      type: query
+      command: |
+        JOB_ID="{{ eval_job.resource.id }}"
+        TOKEN="{{ oc_token }}"
+        for i in $(seq 1 60); do
+          RESP=$(curl -sk             "https://{{ evalhub_host }}/api/v1/evaluations/jobs/${JOB_ID}"             -H "X-Tenant: {{ project_namespace }}"             -H "Authorization: Bearer ${TOKEN}" 2>/dev/null)
+          STATE=$(echo "$RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('status',{}).get('state','?'))" 2>/dev/null)
+          echo "[$(date +%H:%M:%S)] state=$STATE"
+          if [ "$STATE" = "completed" ] || [ "$STATE" = "failed" ] || [ "$STATE" = "cancelled" ]; then
+            echo "Final state: $STATE"
+            break
+          fi
+          sleep 30
+        done
+        echo "ok"
+      store_as: eval_wait_result
     post_check:
       command: "echo ok"
       expected: "ok"

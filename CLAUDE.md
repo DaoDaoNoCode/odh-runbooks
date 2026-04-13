@@ -561,26 +561,47 @@ IS_TERMINATING=$(oc get pod "$POD_NAME" -n <ns> \
 [ -n "$IS_TERMINATING" ] && continue  # wait for new pod to appear
 ```
 
-### `1/2 Running` — what it means and when to wait vs act
+### `1/2 Running` + readiness probe failed — normal during model loading
 
-In KServe RawDeployment, pods can have 2 containers: the model server + a proxy sidecar (e.g. `kube-rbac-proxy` injected by OpenShift). `1/2 Running` means one container is ready, one is not yet.
+The most common `1/2 Running` state is **not an error**. It is the expected lifecycle
+of any ML serving container: start → load weights into memory → begin serving → ready.
 
-**When `1/2 Running` is normal and you should keep waiting:**
-- During CPU model loading: the model server (`kserve-container`) takes 5-30 minutes on CPU to load weights. The readiness probe passes only after the model is fully loaded. The sidecar may start faster.
-- State progression: `0/2 Pending` → `0/2 Init` → `1/2 Running` → `2/2 Running` → `Loaded`
+The readiness probe fires against the serving port (e.g. 8080) the whole time.
+While weights are loading it gets `connection refused` because the HTTP server
+hasn't started yet. This is normal. Once loading completes, the server starts,
+the readiness probe passes, and the pod goes to `2/2 Running`.
 
-**When `1/2 Running` persists too long (> model load time), check which container is stuck:**
+**The only thing that matters during this wait: is the container still Running?**
 ```bash
-oc describe pod <pod> -n <ns> | grep -A 5 "Containers:" | grep -E "Name:|Ready:|State:"
-# OR
-oc get pod <pod> -n <ns> -o jsonpath='{.status.containerStatuses[*].name} {.status.containerStatuses[*].ready}'
+# Generic: check container states (not readiness)
+oc get pod <pod> -n <ns> \
+  -o jsonpath='{range .status.containerStatuses[*]}{.name}: {.state}{"\n"}{end}'
 ```
 
-If the stuck container is `kube-rbac-proxy` or another proxy, check its logs:
+- Container state `running` + readiness failing → **still loading, keep waiting**
+- Container state `waiting: CrashLoopBackOff` → crashed, check logs
+- Container state `terminated: OOMKilled` → out of memory, reduce resources
+
+**Read events to understand what's happening (generic diagnostic):**
 ```bash
-oc logs <pod> -n <ns> -c kube-rbac-proxy --tail=20
+oc get events -n <ns> \
+  --field-selector involvedObject.name=<pod-name> \
+  --sort-by='.lastTimestamp' | tail -10
 ```
-Common proxy issues: missing ClusterRole, wrong service account token, port conflict.
+
+Event says `Readiness probe failed: connection refused` → server loading, normal.
+Event says `Readiness probe failed: HTTP 500` → server started but erroring, check logs.
+Event says `OOMKilled` or `BackOff` → real failure, investigate.
+
+**When `1/2 Running` persists longer than expected**, check which container is the stuck one:
+```bash
+oc get pod <pod> -n <ns> \
+  -o jsonpath='{.status.containerStatuses[*].name} {.status.containerStatuses[*].ready}'
+# If a proxy/sidecar (not the model container) is the unready one, check its logs:
+oc logs <pod> -n <ns> -c <sidecar-container-name> --tail=20
+```
+
+**CPU model load times (rough estimates):** qwen2.5-0.5b ≈ 3-5 min, llama-3.2-1b ≈ 10 min, granite-3.3-2b ≈ 20 min. If the pod is still `1/2 Running` with `connection refused` within these windows — it is working normally.
 
 ---
 

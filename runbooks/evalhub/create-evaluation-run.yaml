@@ -73,16 +73,21 @@ parameters:
     required: false
     default: lm_evaluation_harness
     enum: ["lm_evaluation_harness", "lighteval", "garak", "guidellm"]
-    hint: "lm_evaluation_harness: accuracy benchmarks. garak: safety. guidellm: performance. lighteval: alternative harness."
+    hint: >
+      IMPORTANT: Only lm_evaluation_harness logs to MLflow (provides the MLflow embedded
+      view in the results page). lighteval, garak, guidellm do NOT log mlflow_run_id.
+      The runner pod gets MLFLOW_WORKSPACE={{ project_namespace }} and
+      MLFLOW_TRACKING_URI automatically from the EvalHub operator — no manual config needed.
 
   - name: benchmark_id
-    description: Benchmark to run (check available benchmarks in the dashboard Evaluations page)
+    description: Benchmark to run
     required: false
     default: arc_easy
     hint: >
-      Check what benchmarks are available: the dashboard shows all options when creating an evaluation.
-      arc_easy (lm_evaluation_harness): standard science Q&A, 9501 samples — async, takes hours on CPU.
-      Evaluation runs are async — submit and check the dashboard URL for results.
+      Available benchmarks: check the dashboard Evaluations → New evaluation page.
+      arc_easy (9501 samples): standard, takes hours on CPU — async, check dashboard later.
+      Smaller lm_evaluation_harness options: winogender (720), blimp (1000), truthfulqa_mc1 (817).
+      Only lm_evaluation_harness benchmarks produce the MLflow embedded view.
 
 steps:
 
@@ -837,6 +842,9 @@ known_bad_patterns:
   - "never set model_uri (S3 path) — the default OCI catalog path needs no S3"
   - "never create the EvalHub Route manually — auto-created by odh-model-controller"
   - "if model fails to load with OOM: use llama-3.2-1b-instruct (2.5GB) instead of default"
+  - "never use lighteval/garak/guidellm expecting the MLflow embedded view — only lm_evaluation_harness logs mlflow_run_id"
+  - "never create EvalHub CRs in user namespaces — EvalHub is a shared cluster service in the ODH namespace"
+  - "never wait for evaluation completion in a runbook — evaluations are async, use the dashboard URL"
 
 rollback_order:
   - "oc delete evalhub {{ evalhub_instance_name }} -n {{ project_namespace }} 2>/dev/null || true"

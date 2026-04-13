@@ -189,15 +189,9 @@ steps:
         if oc get configmap federation-config -n $ODH_NS 2>/dev/null | grep -q federation-config; then
           ENTRY=$(oc get configmap federation-config -n $ODH_NS \
             -o jsonpath='{.data.module-federation-config\.json}' 2>/dev/null | \
-            python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-for m in d:
-    if m.get('name')=='mlflowEmbedded':
-        print('OK: mlflowEmbedded entry found')
-        print('  service:', m.get('service',{}))
-        print('  remoteEntry:', m.get('remoteEntry',''))
-" 2>/dev/null)
+            jq -r '.[] | select(.name=="mlflowEmbedded") |
+              "OK: mlflowEmbedded found — service: \(.service) remoteEntry: \(.remoteEntry)"' \
+            2>/dev/null)
           echo "${ENTRY:-(not found in federation-config)}"
         else
           echo "WARNING: federation-config ConfigMap not found"

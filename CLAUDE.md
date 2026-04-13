@@ -531,32 +531,56 @@ oc logs -l serving.kserve.io/inferenceservice=<model> -n <ns> -c kserve-containe
 
 | Log shows | Root cause | Standard fix |
 |---|---|---|
-| `killed` / `OOMKilled` in events | Not enough memory for the model | Reduce `--max-model-len` to 4096 or 2048, or use a smaller model |
+| `max_model_len` exceeds model's max | --max-model-len too high | Reduce to model's actual max (e.g. qwen2.5-0.5b max is 2048) |
+| `killed` / `OOMKilled` in events | Not enough memory for the model | Reduce `--max-model-len` further or use a smaller model |
 | `RuntimeError: bfloat16 is not supported` | Wrong dtype for GPU type | Change `--dtype=half` → `--dtype=bfloat16`, or remove `--dtype` |
 | `no module named vllm` / import error | Wrong container image | Check runtime image — likely wrong ServingRuntime |
-| `model not found` / path error | Wrong storageUri | Verify `oc get inferenceservice -o yaml | grep storageUri` |
 | `CUDA out of memory` | GPU VRAM too small | Reduce `--gpu-memory-utilization` to 0.85, or reduce `--max-model-len` |
 
-**Principle:** Look at the log, identify the single clearest root cause, apply the minimum
-standard fix from the table above. Do not stack multiple changes at once.
-If the log shows an error not in this table or the cause is unclear — show the log and stop.
+**When applying a fix to an InferenceService:** re-apply the full manifest (not `oc patch` with index-based args) to avoid fragile index arithmetic. Delete and recreate is cleaner.
 
-**Never:** patch around the error with environment hacks, skip validation, or modify operator-owned resources.
+**Principle:** one root cause → one standard fix. If the log is unclear → show it and stop.
 
-### Polling loop pattern — check both state AND pod health
-When waiting for a model to load, check both every iteration:
+**Never:** patch around the error with env hacks, skip validation, or modify operator-owned resources.
+
+### Polling — always track the NEWEST pod
+
+When multiple pods exist (during a rolling update after a patch), **always sort by creation time and track the newest one**. Old terminating/crashing pods are irrelevant.
+
 ```bash
-# Check InferenceService state
-STATE=$(oc get inferenceservice <model> -n <ns> -o jsonpath='{.status.modelStatus.states.activeModelState}')
-
-# Also check pod — stop fast on terminal conditions
+# WRONG — head -1 may return an old pod from a previous rollout
 POD_NAME=$(oc get pods -l serving.kserve.io/inferenceservice=<model> -n <ns> --no-headers | head -1 | awk '{print $1}')
-POD_STATUS=$(oc get pod $POD_NAME -n <ns> --no-headers | awk '{print $3}')
 
-# Terminal → stop: Unschedulable, ImagePullBackOff, CrashLoopBackOff
-# Possibly fixable → check logs: CrashLoopBackOff, OOMKilled
-# Keep waiting → genuinely progressing: Init, ContainerCreating, Running
+# CORRECT — sort by age, newest last
+POD_NAME=$(oc get pods -l serving.kserve.io/inferenceservice=<model> -n <ns> \
+  --no-headers --sort-by=.metadata.creationTimestamp 2>/dev/null | tail -1 | awk '{print $1}')
+
+# Skip if the pod is being terminated (old rollout pod)
+IS_TERMINATING=$(oc get pod "$POD_NAME" -n <ns> \
+  -o jsonpath='{.metadata.deletionTimestamp}' 2>/dev/null)
+[ -n "$IS_TERMINATING" ] && continue  # wait for new pod to appear
 ```
+
+### `1/2 Running` — what it means and when to wait vs act
+
+In KServe RawDeployment, pods can have 2 containers: the model server + a proxy sidecar (e.g. `kube-rbac-proxy` injected by OpenShift). `1/2 Running` means one container is ready, one is not yet.
+
+**When `1/2 Running` is normal and you should keep waiting:**
+- During CPU model loading: the model server (`kserve-container`) takes 5-30 minutes on CPU to load weights. The readiness probe passes only after the model is fully loaded. The sidecar may start faster.
+- State progression: `0/2 Pending` → `0/2 Init` → `1/2 Running` → `2/2 Running` → `Loaded`
+
+**When `1/2 Running` persists too long (> model load time), check which container is stuck:**
+```bash
+oc describe pod <pod> -n <ns> | grep -A 5 "Containers:" | grep -E "Name:|Ready:|State:"
+# OR
+oc get pod <pod> -n <ns> -o jsonpath='{.status.containerStatuses[*].name} {.status.containerStatuses[*].ready}'
+```
+
+If the stuck container is `kube-rbac-proxy` or another proxy, check its logs:
+```bash
+oc logs <pod> -n <ns> -c kube-rbac-proxy --tail=20
+```
+Common proxy issues: missing ClusterRole, wrong service account token, port conflict.
 
 ---
 

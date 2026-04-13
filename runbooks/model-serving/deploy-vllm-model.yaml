@@ -322,9 +322,11 @@ steps:
         echo "Waiting 45s for scheduling attempt..."
         sleep 45
 
+        # Always track the NEWEST pod — during a rollout after a patch, old crashing
+        # pods are irrelevant. Sorting by creationTimestamp and taking the last one.
         POD_LINE=$(oc get pods -n {{ project_namespace }} \
           -l serving.kserve.io/inferenceservice={{ model_name }} \
-          --no-headers 2>/dev/null | head -1)
+          --no-headers --sort-by=.metadata.creationTimestamp 2>/dev/null | tail -1)
 
         if [ -z "$POD_LINE" ]; then
           echo "no pod yet — InferenceService controller still processing"
@@ -334,7 +336,16 @@ steps:
 
         POD_NAME=$(echo "$POD_LINE" | awk '{print $1}')
         POD_STATUS=$(echo "$POD_LINE" | awk '{print $3}')
-        echo "Pod: $POD_NAME  Status: $POD_STATUS"
+        echo "Pod (newest): $POD_NAME  Status: $POD_STATUS"
+
+        # Skip if this is an old terminating pod (deletionTimestamp set)
+        IS_TERM=$(oc get pod "$POD_NAME" -n {{ project_namespace }} \
+          -o jsonpath='{.metadata.deletionTimestamp}' 2>/dev/null)
+        if [ -n "$IS_TERM" ]; then
+          echo "Newest pod is terminating — waiting for new pod to be created"
+          echo "ok"
+          exit 0
+        fi
 
         # --- Check Unschedulable ---
         UNSCHED=$(oc get pod "$POD_NAME" -n {{ project_namespace }} \
@@ -403,7 +414,7 @@ steps:
       command: |
         POD_NAME=$(oc get pods -n {{ project_namespace }} \
           -l serving.kserve.io/inferenceservice={{ model_name }} \
-          --no-headers 2>/dev/null | head -1 | awk '{print $1}')
+          --no-headers --sort-by=.metadata.creationTimestamp 2>/dev/null | tail -1 | awk '{print $1}')
         if [ -z "$POD_NAME" ]; then echo "ok"; exit 0; fi
         IMG=$(oc get pod "$POD_NAME" -n {{ project_namespace }} \
           -o jsonpath='{.status.containerStatuses[*].state.waiting.reason} {.status.initContainerStatuses[*].state.waiting.reason}' \

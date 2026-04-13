@@ -71,9 +71,24 @@ parameters:
   - name: benchmark_provider
     description: Benchmark provider for the evaluation run
     required: false
-    default: lm_evaluation_harness
-    enum: ["lm_evaluation_harness", "garak"]
-    hint: "lm-evaluation-harness: accuracy benchmarks. garak: safety/red-teaming."
+    default: lighteval
+    enum: ["lm_evaluation_harness", "lighteval", "garak", "guidellm"]
+    hint: >
+      lighteval: recommended — use aime24 (30 samples, ~2 min) for quick test.
+      lm_evaluation_harness: arc_easy has 9501 samples (~7h on CPU). Choose a
+      smaller benchmark like blimp (1000 samples) or winogender (720 samples).
+      garak: safety/red-teaming scan. guidellm: performance testing.
+
+  - name: benchmark_id
+    description: Benchmark to run
+    required: false
+    default: aime24
+    hint: >
+      Quick tests (lighteval): aime24 (30 samples), aime25 (30 samples),
+        openbookqa (500 samples), winogrande (1267 samples)
+      Larger benchmarks (lm_evaluation_harness): winogender (720), blimp (1000),
+        arc_easy (9501 samples ~7h on CPU)
+      Use aime24 via lighteval for a quick end-to-end verification.
 
 steps:
 
@@ -197,50 +212,45 @@ steps:
   - id: wait-evalhub-url
     confidence: doc-derived
     description: >
-      Wait for the EvalHub operator to populate status.url in the CR.
-      The dashboard BFF reads status.url to know where to proxy API calls.
-      Without it the dashboard cannot reach the EvalHub and shows "No existing
-      evaluation runs" even when jobs exist. The operator sets this after the
-      EvalHub service is fully ready (may take 15-30 seconds after phase=Ready).
+      Verify that the shared EvalHub in the ODH namespace has status.url populated.
+      The dashboard BFF reads status.url from the EvalHub CR (in redhat-ods-applications
+      or opendatahub, NOT project_namespace) to know where to proxy API calls.
+      Without it the dashboard shows "No existing evaluation runs".
     action:
       type: query
       command: |
-        for i in $(seq 1 24); do
-          URL=$(oc get evalhub {{ evalhub_instance_name }} -n {{ project_namespace }}             -o jsonpath='{.status.url}' 2>/dev/null)
+        for ns in redhat-ods-applications opendatahub; do
+          URL=$(oc get evalhub -n $ns \
+            -o jsonpath='{.items[0].status.url}' 2>/dev/null)
           if [ -n "$URL" ]; then
-            echo "status.url: $URL"
+            echo "EvalHub status.url: $URL (namespace: $ns)"
             exit 0
           fi
-          echo "[$i/24] Waiting for status.url to be populated..."
+        done
+        echo "status.url not set yet — waiting up to 2 min for operator..."
+        for i in $(seq 1 24); do
+          for ns in redhat-ods-applications opendatahub; do
+            URL=$(oc get evalhub -n $ns -o jsonpath='{.items[0].status.url}' 2>/dev/null)
+            [ -n "$URL" ] && echo "status.url set: $URL" && exit 0
+          done
+          echo "[$i/24] waiting..."
           sleep 5
         done
-        # status.url not set — operator bug or older version.
-        # Manually patch it so the dashboard BFF can find the service.
-        # The service name follows: evalhub-instance.<namespace>.svc.cluster.local:8443
-        PATCH_URL="https://{{ evalhub_instance_name }}.{{ project_namespace }}.svc.cluster.local:8443"
-        echo "status.url not set by operator — patching manually: $PATCH_URL"
-        oc patch evalhub {{ evalhub_instance_name }} -n {{ project_namespace }} \
-          --type=merge --subresource=status \
-          -p "{\"status\":{\"url\":\"$PATCH_URL\"}}" 2>/dev/null || \
-          echo "Patch failed — may need cluster-admin. Check operator version."
-        echo "done"
+        echo "WARNING: status.url still empty"
       store_as: evalhub_status_url
     post_check:
       command: |
-        URL=$(oc get evalhub {{ evalhub_instance_name }} -n {{ project_namespace }} \
-          -o jsonpath='{.status.url}' 2>/dev/null)
-        [ -n "$URL" ] && echo "ok" || echo "status.url-empty"
+        for ns in redhat-ods-applications opendatahub; do
+          URL=$(oc get evalhub -n $ns -o jsonpath='{.items[0].status.url}' 2>/dev/null)
+          [ -n "$URL" ] && echo "ok" && exit 0
+        done
+        echo "empty"
       expected: "ok"
       timeout: "30s"
       on_fail: STOP
     on_fail_hint: >
-      status.url is still empty after patching. Check operator logs:
+      EvalHub status.url not set in the ODH namespace. Check operator logs:
       oc logs -n redhat-ods-applications -l control-plane=controller-manager --tail=20 | grep -i evalhub
-      The eval-hub BFF cannot reach the EvalHub without this field set.
-      Manual patch: oc patch evalhub {{ evalhub_instance_name }} -n {{ project_namespace }}
-        --type=merge --subresource=status
-        -p '{"status":{"url":"https://{{ evalhub_instance_name }}.{{ project_namespace }}.svc.cluster.local:8443"}}'
-
   - id: verify-evalhub-dashboard-visibility
     confidence: doc-derived
     description: >
@@ -732,7 +742,7 @@ steps:
             "url": "{{ model_url }}"
           },
           "benchmarks": [{
-            "id": "arc_easy",
+            "id": "{{ benchmark_id }}",
             "provider_id": "{{ benchmark_provider }}",
             "primary_score": {
               "metric": "acc_norm",

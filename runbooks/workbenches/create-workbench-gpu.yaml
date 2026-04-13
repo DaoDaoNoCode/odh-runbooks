@@ -123,6 +123,8 @@ steps:
             openshift.io/display-name: "{{ workbench_name }}"
             openshift.io/description: ""
             notebooks.opendatahub.io/inject-auth: "true"
+            opendatahub.io/username: "{{ workbench_owner }}"
+            opendatahub.io/connections: ""
             notebooks.opendatahub.io/last-image-selection: "{{ notebook_image }}"
             notebooks.opendatahub.io/last-size-selection: "Large"
         spec:

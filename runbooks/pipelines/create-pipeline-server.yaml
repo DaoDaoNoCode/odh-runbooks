@@ -162,9 +162,11 @@ steps:
           labels:
             opendatahub.io/dashboard: "true"
         spec:
+          dspVersion: "v2"
           apiServer:
             deploy: true
             enableSamplePipeline: false
+            cacheEnabled: true
           database:
             disableHealthCheck: false
             mariaDB:

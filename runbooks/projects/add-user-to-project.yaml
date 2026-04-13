@@ -1,0 +1,103 @@
+name: projects-add-user-to-project
+description: >
+  Grant a user access to a Data Science Project by creating a RoleBinding.
+  ODH uses standard OpenShift RBAC. Three access levels: admin, edit (contributor), view.
+  Users added here appear in the project's permissions in the dashboard.
+rhoai_version_tested: null
+confidence_overall: doc-derived
+
+parameters:
+  - name: project_namespace
+    description: Project namespace to grant access to
+    required: true
+  - name: username
+    description: OpenShift username to grant access (oc get users to list)
+    required: true
+  - name: role
+    description: "Access level: admin | edit | view"
+    required: false
+    default: edit
+
+steps:
+  - id: check-project-exists
+    confidence: doc-derived
+    description: Verify project exists
+    requires:
+      - type: namespace
+        name: "{{ project_namespace }}"
+    pre_check:
+      command: "oc get namespace {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      on_fail: STOP
+    action:
+      type: none
+    post_check:
+      command: "oc get namespace {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: check-user-exists
+    confidence: doc-derived
+    description: Verify user exists in OpenShift
+    pre_check:
+      command: "oc get user {{ username }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      on_fail: STOP
+    action:
+      type: none
+    post_check:
+      command: "oc get user {{ username }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: create-rolebinding
+    confidence: doc-derived
+    description: Create RoleBinding granting user access to the project
+    pre_check:
+      command: "oc get rolebinding odh-project-{{ username }}-{{ role }} -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: RoleBinding
+        metadata:
+          name: odh-project-{{ username }}-{{ role }}
+          namespace: {{ project_namespace }}
+          labels:
+            opendatahub.io/dashboard: "true"
+        roleRef:
+          apiGroup: rbac.authorization.k8s.io
+          kind: ClusterRole
+          name: "{{ role }}"
+        subjects:
+          - apiGroup: rbac.authorization.k8s.io
+            kind: User
+            name: "{{ username }}"
+    post_check:
+      command: "oc get rolebinding odh-project-{{ username }}-{{ role }} -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      timeout: "30s"
+      on_fail: STOP
+    rollback: "oc delete rolebinding odh-project-{{ username }}-{{ role }} -n {{ project_namespace }}"
+    return: |
+      ✓ User access granted.
+
+      User:    {{ username }}
+      Project: {{ project_namespace }}
+      Role:    {{ role }}
+
+      Dashboard: Projects → {{ project_namespace }} → Permissions → {{ username }}
+
+known_bad_patterns:
+  - "never use 'cluster-admin' as the role — it grants cluster-wide admin, not just project access"
+  - "never omit the opendatahub.io/dashboard label — the dashboard won't show the permission"
+  - "never grant 'admin' to untrusted users — they can delete the project and all its resources"
+
+rollback_order:
+  - "oc delete rolebinding odh-project-{{ username }}-{{ role }} -n {{ project_namespace }}"

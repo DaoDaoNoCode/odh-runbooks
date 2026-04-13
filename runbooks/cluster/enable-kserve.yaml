@@ -1,0 +1,96 @@
+name: cluster-enable-kserve
+description: >
+  Enable KServe single-model serving in the DataScienceCluster.
+  KServe is used for deploying large models (LLMs, transformers) with dedicated resources.
+  After enabling, users can deploy InferenceServices from any project.
+rhoai_version_tested: null
+confidence_overall: doc-derived
+
+parameters:
+  - name: deployment_mode
+    description: "KServe deployment mode: Serverless (requires Service Mesh) or RawDeployment (simpler)"
+    required: false
+    default: RawDeployment
+
+steps:
+  - id: check-dsc-exists
+    confidence: doc-derived
+    description: Verify DataScienceCluster exists
+    requires:
+      - type: dsc-exists
+    pre_check:
+      command: "oc get dsc --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      on_fail: STOP
+    action:
+      type: none
+    post_check:
+      command: "oc get dsc --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: enable-kserve
+    confidence: doc-derived
+    description: Enable KServe in DataScienceCluster with RawDeployment mode
+    pre_check:
+      command: "oc get dsc -o jsonpath='{.items[0].spec.components.kserve.managementState}'"
+      expected: "Managed"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: patch
+      target: "$(oc get dsc -o name | head -1)"
+      patch: >
+        {"spec":{"components":{"kserve":{"managementState":"Managed",
+        "serving":{"managementState":"Managed",
+        "ingressGateway":{"certificate":{"type":"SelfSigned"}}}}}}}
+      dry_run: false
+    post_check:
+      command: "oc get dsc -o jsonpath='{.items[0].spec.components.kserve.managementState}'"
+      expected: "Managed"
+      timeout: "30s"
+      on_fail: STOP
+
+  - id: wait-kserve-ready
+    confidence: doc-derived
+    description: Wait for DataScienceCluster to finish reconciling KServe
+    action:
+      type: wait
+      command: "oc wait dsc --all --for=condition=Ready --timeout=300s 2>/dev/null || sleep 10"
+    post_check:
+      command: "oc get crd inferenceservices.serving.kserve.io --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "300s"
+      poll_interval: "15s"
+      on_fail: STOP
+
+  - id: verify-kserve-crds
+    confidence: doc-derived
+    description: Verify KServe CRDs are installed
+    action:
+      type: query
+      command: "oc get crd inferenceservices.serving.kserve.io --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      store_as: crd_count
+    post_check:
+      command: "oc get crd inferenceservices.serving.kserve.io --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "30s"
+      on_fail: STOP
+    return: |
+      ✓ KServe enabled successfully.
+
+      CRD available: serving.kserve.io/v1beta1 InferenceService
+      Deployment mode: {{ deployment_mode }}
+
+      Next steps:
+        - Deploy a model: odh run model-serving/deploy-kserve-model -p project_namespace=<ns> -p model_uri=<uri>
+        - Dashboard: Projects → <your-project> → Models and model servers
+
+known_bad_patterns:
+  - "never enable KServe with Serverless mode without first installing OpenShift Service Mesh and Serverless — it will fail silently"
+  - "never delete the InferenceService CRD manually — it will break all deployed models"
+  - "never set managementState to Unmanaged unless you intend to manage KServe yourself"
+
+rollback_order:
+  - "oc patch $(oc get dsc -o name | head -1) --type merge -p '{\"spec\":{\"components\":{\"kserve\":{\"managementState\":\"Removed\"}}}}'"

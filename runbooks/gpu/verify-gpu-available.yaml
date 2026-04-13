@@ -1,0 +1,81 @@
+name: gpu-verify-gpu-available
+description: >
+  Verify GPU nodes are present, the GPU Operator is working, and GPUs
+  are allocatable in the cluster. Run this before any GPU workload.
+  This is a read-only diagnostic runbook — no resources are created.
+rhoai_version_tested: null
+confidence_overall: doc-derived
+
+parameters: []
+
+steps:
+  - id: check-gpu-nodes
+    confidence: doc-derived
+    description: List nodes with GPU labels and their allocatable GPU count
+    requires:
+      - type: openshift-cluster
+    action:
+      type: query
+      command: "oc get nodes -o custom-columns='NAME:.metadata.name,GPU:.status.allocatable.nvidia\\.com/gpu,STATUS:.status.conditions[-1].type' --no-headers 2>/dev/null | grep -v '<none>'"
+      store_as: gpu_nodes
+    post_check:
+      assert: gpu_nodes is not empty
+      command: "oc get nodes -o jsonpath='{.items[*].status.allocatable.nvidia\\.com/gpu}' | tr ' ' '\\n' | grep -v '^0$' | grep -v '<none>' | grep -v '^$' | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "15s"
+      on_fail: STOP
+
+  - id: check-gpu-operator-running
+    confidence: inferred
+    description: Verify NVIDIA GPU Operator pods are Running
+    action:
+      type: query
+      command: "oc get pods -n nvidia-gpu-operator --no-headers 2>/dev/null | grep -v 'Running\\|Completed' | wc -l | tr -d ' '"
+      store_as: unhealthy_pods
+    post_check:
+      command: "oc get pods -n nvidia-gpu-operator --no-headers 2>/dev/null | grep -v 'Running\\|Completed' | wc -l | tr -d ' '"
+      expected: "0"
+      timeout: "15s"
+      on_fail: STOP
+
+  - id: check-device-plugin-daemonset
+    confidence: inferred
+    description: Verify NVIDIA device plugin DaemonSet is fully rolled out
+    action:
+      type: query
+      command: "oc get daemonset -n nvidia-gpu-operator nvidia-device-plugin-daemonset -o jsonpath='{.status.numberReady}' 2>/dev/null || echo 0"
+      store_as: device_plugin_ready
+    post_check:
+      command: "oc get daemonset -n nvidia-gpu-operator nvidia-device-plugin-daemonset -o jsonpath='{.status.numberReady}' 2>/dev/null || echo 0"
+      expected_min: 1
+      timeout: "15s"
+      on_fail: STOP
+
+  - id: get-total-gpu-count
+    confidence: doc-derived
+    description: Count total allocatable GPUs in cluster
+    action:
+      type: query
+      command: "oc get nodes -o jsonpath='{range .items[*]}{.status.allocatable.nvidia\\.com/gpu}{\"\\n\"}{end}' | grep -v '^0$' | grep -v '^$' | awk '{sum+=$1} END {print sum}'"
+      store_as: total_gpus
+    post_check:
+      assert: total_gpus is not empty
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+    return: |
+      ✓ GPU verification complete.
+
+      GPU nodes:
+      {{ gpu_nodes }}
+
+      Total allocatable GPUs: {{ total_gpus }}
+      Device plugin ready:    {{ device_plugin_ready }} nodes
+
+      Status: Ready for GPU workloads.
+
+known_bad_patterns:
+  - "this runbook is read-only — no action needed if checks pass"
+
+rollback_order: []

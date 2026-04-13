@@ -1,0 +1,174 @@
+name: model-registry-register-model
+description: >
+  Register a model version in the ODH Model Registry via REST API.
+  Creates: RegisteredModel → ModelVersion → ModelArtifact chain.
+  The model registry is not a control plane — it stores metadata only.
+rhoai_version_tested: null
+confidence_overall: inferred
+
+parameters:
+  - name: registry_name
+    description: Model registry instance name
+    required: false
+    default: model-registry
+    discover_cmd: "oc get modelregistry -n odh-model-registries --no-headers -o jsonpath='{.items[*].metadata.name}' 2>/dev/null"
+    hint: "Run 'oc get modelregistry -n odh-model-registries' to list registries"
+  - name: registry_namespace
+    description: Namespace where registry is deployed (always odh-model-registries)
+    required: false
+    default: odh-model-registries
+    hint: "Always 'odh-model-registries' — this is where the ODH operator deploys registries"
+  - name: model_name
+    description: Human-readable name for the model in the registry
+    required: true
+    example: "llama3-8b-instruct"
+    hint: "Shown in dashboard. Use a descriptive name — spaces and capitals are OK."
+  - name: model_version
+    description: Version string for this model version
+    required: false
+    default: "1"
+    example: "1.0.0"
+    hint: "Semantic versioning recommended (1.0.0). Immutable once created — create a new version to update."
+  - name: model_uri
+    description: URI where the model artifacts are stored (s3://, oci://)
+    required: true
+  - name: model_format
+    description: "Format of the model: vllm, openvino_ir, onnx, sklearn, pytorch"
+    required: false
+    default: vllm
+  - name: author
+    description: Author of this model version
+    required: false
+    default: odh-assistant
+
+steps:
+  - id: get-registry-token
+    confidence: inferred
+    description: Get auth token for model registry API
+    requires:
+      - type: model-registry-instance
+    action:
+      type: query
+      command: "oc whoami -t"
+      store_as: oc_token
+    post_check:
+      assert: oc_token is not empty
+      command: "oc whoami -t"
+      expected_min: 1
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: get-registry-url
+    confidence: inferred
+    description: Get model registry REST API URL
+    action:
+      type: query
+      command: "oc get route {{ registry_name }}-rest -n {{ registry_namespace }} -o jsonpath='{.spec.host}' 2>/dev/null"
+      store_as: registry_host
+    post_check:
+      assert: registry_host is not empty
+      command: "oc get route {{ registry_name }}-rest -n {{ registry_namespace }} -o jsonpath='{.spec.host}'"
+      expected_min: 1
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: create-registered-model
+    confidence: inferred
+    description: Create the top-level RegisteredModel entry via REST API
+    action:
+      type: api_call
+      method: POST
+      url: "https://{{ registry_host }}/api/model_registry/v1alpha3/registered_models"
+      headers:
+        Content-Type: "application/json"
+        Authorization: "Bearer {{ oc_token }}"
+      body: |
+        {
+          "name": "{{ model_name }}",
+          "owner": "{{ author }}",
+          "state": "LIVE",
+          "customProperties": {}
+        }
+      store_response_as: registered_model
+    post_check:
+      assert: registered_model is not empty
+      command: "echo 'registered model created'"
+      expected: "registered model created"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: create-model-version
+    confidence: inferred
+    description: Create a ModelVersion for the registered model
+    action:
+      type: api_call
+      method: POST
+      url: "https://{{ registry_host }}/api/model_registry/v1alpha3/model_versions"
+      headers:
+        Content-Type: "application/json"
+        Authorization: "Bearer {{ oc_token }}"
+      body: |
+        {
+          "name": "{{ model_version }}",
+          "author": "{{ author }}",
+          "registeredModelId": "{{ registered_model.id }}",
+          "state": "LIVE",
+          "customProperties": {
+            "model_format": {
+              "string_value": "{{ model_format }}"
+            }
+          }
+        }
+      store_response_as: model_version_obj
+    post_check:
+      assert: model_version_obj is not empty
+      command: "echo 'model version created'"
+      expected: "model version created"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: create-model-artifact
+    confidence: inferred
+    description: Create ModelArtifact linking model version to storage URI
+    action:
+      type: api_call
+      method: POST
+      url: "https://{{ registry_host }}/api/model_registry/v1alpha3/model_artifacts"
+      headers:
+        Content-Type: "application/json"
+        Authorization: "Bearer {{ oc_token }}"
+      body: |
+        {
+          "name": "{{ model_name }}-artifact",
+          "uri": "{{ model_uri }}",
+          "state": "LIVE",
+          "artifactType": "model-artifact",
+          "modelVersionId": "{{ model_version_obj.id }}"
+        }
+      store_response_as: model_artifact
+    post_check:
+      assert: model_artifact is not empty
+      command: "echo 'model artifact created'"
+      expected: "model artifact created"
+      timeout: "10s"
+      on_fail: STOP
+    return: |
+      ✓ Model registered successfully.
+
+      Registered Model ID: {{ registered_model.id }}
+      Model Version ID:    {{ model_version_obj.id }}
+      Artifact ID:         {{ model_artifact.id }}
+      Storage URI:         {{ model_uri }}
+
+      Dashboard: Model Registry → {{ model_name }} → Version {{ model_version }}
+      Next step: odh run model-registry/deploy-from-registry -p registry_name={{ registry_name }} -p model_version_id={{ model_version_obj.id }}
+
+known_bad_patterns:
+  - "never create a ModelArtifact without first creating RegisteredModel + ModelVersion — the foreign key will fail"
+  - "never use an unreachable URI in model_uri — the registry accepts it but deployment will fail later"
+  - "never register the same model name twice with different URIs without creating a new version — update the version instead"
+
+rollback_order:
+  - "DELETE https://{{ registry_host }}/api/model_registry/v1alpha3/model_artifacts/{{ model_artifact.id }}"
+  - "DELETE https://{{ registry_host }}/api/model_registry/v1alpha3/model_versions/{{ model_version_obj.id }}"
+  - "DELETE https://{{ registry_host }}/api/model_registry/v1alpha3/registered_models/{{ registered_model.id }}"

@@ -1,0 +1,118 @@
+name: mlflow-search-and-compare-runs
+description: >
+  Search MLflow runs using SQL-like filters to find the best model.
+  Supports filtering by metrics, parameters, tags, and run status.
+  Essential for comparing experiments and selecting the best run for registration.
+rhoai_version_tested: null
+confidence_overall: doc-derived
+
+parameters:
+  - name: mlflow_tracking_uri
+    description: MLflow server URL
+    required: true
+  - name: experiment_name
+    description: Experiment to search within
+    required: true
+  - name: min_accuracy
+    description: Minimum val_accuracy to filter runs
+    required: false
+    default: "0.80"
+
+steps:
+  - id: get-experiment-id
+    confidence: doc-derived
+    description: Look up experiment ID by name
+    action:
+      type: api_call
+      method: POST
+      url: "{{ mlflow_tracking_uri }}/api/2.0/mlflow/experiments/get-by-name"
+      headers:
+        Content-Type: "application/json"
+      body: |
+        {"experiment_name": "{{ experiment_name }}"}
+      store_response_as: experiment
+    post_check:
+      assert: experiment is not empty
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: search-best-runs
+    confidence: doc-derived
+    description: Find top 5 runs by val_accuracy above threshold, ordered best first
+    action:
+      type: api_call
+      method: POST
+      url: "{{ mlflow_tracking_uri }}/api/2.0/mlflow/runs/search"
+      headers:
+        Content-Type: "application/json"
+      body: |
+        {
+          "experiment_ids": ["{{ experiment.experiment.experiment_id }}"],
+          "filter": "metrics.val_accuracy > {{ min_accuracy }} AND status = 'FINISHED'",
+          "order_by": ["metrics.val_accuracy DESC"],
+          "max_results": 5,
+          "run_view_type": "ACTIVE_ONLY"
+        }
+      store_response_as: search_results
+    post_check:
+      assert: search_results is not empty
+      command: "echo ok"
+      expected: "ok"
+      timeout: "30s"
+      on_fail: STOP
+    return: |
+      ✓ Run search complete.
+
+      Experiment: {{ experiment_name }}
+      Filter: val_accuracy > {{ min_accuracy }} AND status = FINISHED
+      Results: Top 5 by accuracy
+
+      Best runs found — check MLflow UI to compare:
+        {{ mlflow_tracking_uri }}/#/experiments/{{ experiment.experiment.experiment_id }}
+
+      ────────────────────────────────────────────────────────
+      Search syntax examples (use in filter field):
+
+      # Metrics:
+        metrics.accuracy > 0.9
+        metrics.loss < 0.1
+        metrics.f1_score >= 0.85
+
+      # Parameters:
+        params.optimizer = 'adam'
+        params.learning_rate < '0.01'
+        params.batch_size IN ('32', '64')
+
+      # Tags:
+        tags.environment = 'production'
+        tags.framework LIKE '%torch%'
+
+      # Combined (AND only):
+        metrics.accuracy > 0.9 AND params.optimizer = 'adam' AND status = 'FINISHED'
+
+      # Run metadata:
+        run_id = '...'
+        status = 'FAILED'
+        status IN ('FINISHED', 'RUNNING')
+
+      Python equivalent:
+        import mlflow
+        mlflow.set_tracking_uri("{{ mlflow_tracking_uri }}")
+        runs = mlflow.search_runs(
+            experiment_names=["{{ experiment_name }}"],
+            filter_string="metrics.val_accuracy > {{ min_accuracy }}",
+            order_by=["metrics.val_accuracy DESC"],
+            max_results=5
+        )  # Returns pandas DataFrame
+        best_run_id = runs.iloc[0]["run_id"]
+      ────────────────────────────────────────────────────────
+
+known_bad_patterns:
+  - "never use OR in filter strings — MLflow only supports AND between conditions"
+  - "never search without specifying experiment_ids — it searches ALL experiments and is slow"
+  - "never compare runs from different experiments without normalizing the metric names first"
+  - "never use run_view_type=DELETED_ONLY unless you are auditing — use ACTIVE_ONLY for normal search"
+
+rollback_order: []

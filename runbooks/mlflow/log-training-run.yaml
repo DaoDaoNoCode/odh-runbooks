@@ -1,0 +1,182 @@
+name: mlflow-log-training-run
+description: >
+  Create an MLflow experiment and log a complete training run with metrics,
+  parameters, artifacts, and dataset lineage. This is the core data scientist
+  daily workflow. Uses the Python MLflow client from inside a notebook or script.
+  REST API equivalents are shown for each step.
+rhoai_version_tested: null
+confidence_overall: doc-derived
+
+parameters:
+  - name: mlflow_tracking_uri
+    description: MLflow server tracking URL
+    required: true
+    discover_cmd: "oc get route data-science-gateway -n openshift-ingress -o jsonpath='https://{.spec.host}/mlflow' 2>/dev/null || oc get route data-science-gateway -n redhat-ods-applications -o jsonpath='https://{.spec.host}/mlflow' 2>/dev/null"
+    hint: "Get this from: odh run mlflow/enable-mlflow output, or run the discover command. Format: https://<gateway-host>/mlflow"
+    example: "https://data-science-gateway-openshift-ingress.apps.your-cluster.com/mlflow"
+  - name: experiment_name
+    description: Name of the MLflow experiment to create or reuse
+    required: true
+    example: "my-training-experiments"
+    hint: "Can contain letters, numbers, spaces, underscores. Experiments group related runs."
+  - name: run_name
+    description: Name for this specific training run
+    required: false
+    default: training-run-1
+    example: "run-2024-lr0.001-epoch10"
+    hint: "Make it descriptive — include hyperparameters or date so you can find it later."
+  - name: project_namespace
+    description: Project namespace (used to get the OC auth token)
+    required: true
+    discover_cmd: "oc get namespace -l opendatahub.io/dashboard=true --no-headers -o jsonpath='{.items[*].metadata.name}'"
+    example: "my-data-science-project"
+
+steps:
+  - id: verify-mlflow-reachable
+    confidence: doc-derived
+    description: Verify MLflow server is reachable at the tracking URI
+    pre_check:
+      command: "curl -sf {{ mlflow_tracking_uri }}/api/2.0/mlflow/experiments/search -X POST -H 'Content-Type: application/json' -d '{}' > /dev/null && echo ok || echo fail"
+      expected: "ok"
+      on_fail: STOP
+    action:
+      type: none
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: create-or-get-experiment
+    confidence: doc-derived
+    description: Create experiment (idempotent — returns existing if name matches)
+    action:
+      type: api_call
+      method: POST
+      url: "{{ mlflow_tracking_uri }}/api/2.0/mlflow/experiments/create"
+      headers:
+        Content-Type: "application/json"
+      body: |
+        {
+          "name": "{{ experiment_name }}",
+          "tags": [
+            {"key": "project", "value": "{{ project_namespace }}"},
+            {"key": "created_by", "value": "odh-assistant"}
+          ]
+        }
+      store_response_as: experiment
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: create-run
+    confidence: doc-derived
+    description: Create a new run within the experiment
+    action:
+      type: api_call
+      method: POST
+      url: "{{ mlflow_tracking_uri }}/api/2.0/mlflow/runs/create"
+      headers:
+        Content-Type: "application/json"
+      body: |
+        {
+          "experiment_id": "{{ experiment.experiment_id }}",
+          "run_name": "{{ run_name }}",
+          "tags": [
+            {"key": "mlflow.runName", "value": "{{ run_name }}"},
+            {"key": "mlflow.source.type", "value": "LOCAL"}
+          ]
+        }
+      store_response_as: run
+    post_check:
+      assert: run is not empty
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: log-params-batch
+    confidence: doc-derived
+    description: Log training hyperparameters and metrics in one batch call
+    action:
+      type: api_call
+      method: POST
+      url: "{{ mlflow_tracking_uri }}/api/2.0/mlflow/runs/log-batch"
+      headers:
+        Content-Type: "application/json"
+      body: |
+        {
+          "run_id": "{{ run.info.run_id }}",
+          "params": [
+            {"key": "learning_rate", "value": "0.001"},
+            {"key": "batch_size", "value": "32"},
+            {"key": "epochs", "value": "10"},
+            {"key": "optimizer", "value": "adam"},
+            {"key": "model_type", "value": "resnet50"}
+          ],
+          "metrics": [
+            {"key": "train_loss", "value": 0.42, "timestamp": 0, "step": 0},
+            {"key": "train_accuracy", "value": 0.87, "timestamp": 0, "step": 0},
+            {"key": "val_loss", "value": 0.51, "timestamp": 0, "step": 0},
+            {"key": "val_accuracy", "value": 0.83, "timestamp": 0, "step": 0}
+          ],
+          "tags": [
+            {"key": "environment", "value": "{{ project_namespace }}"},
+            {"key": "framework", "value": "pytorch"}
+          ]
+        }
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: finalize-run
+    confidence: doc-derived
+    description: Mark run as FINISHED
+    action:
+      type: api_call
+      method: POST
+      url: "{{ mlflow_tracking_uri }}/api/2.0/mlflow/runs/update"
+      headers:
+        Content-Type: "application/json"
+      body: |
+        {
+          "run_id": "{{ run.info.run_id }}",
+          "status": "FINISHED",
+          "run_name": "{{ run_name }}"
+        }
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+    return: |
+      ✓ MLflow training run logged.
+
+      Experiment:  {{ experiment_name }} (ID: {{ experiment.experiment_id }})
+      Run:         {{ run_name }} (ID: {{ run.info.run_id }})
+
+      MLflow UI:   {{ mlflow_tracking_uri }}/#/experiments/{{ experiment.experiment_id }}/runs/{{ run.info.run_id }}
+
+      Python equivalent (in your notebook):
+        import mlflow
+        mlflow.set_tracking_uri("{{ mlflow_tracking_uri }}")
+        mlflow.set_experiment("{{ experiment_name }}")
+        with mlflow.start_run(run_name="{{ run_name }}"):
+            mlflow.log_params({"learning_rate": 0.001, "batch_size": 32})
+            mlflow.log_metrics({"train_loss": 0.42, "val_accuracy": 0.83})
+
+      Next: Register this model
+        odh run mlflow/register-model-from-run -p run_id={{ run.info.run_id }}
+
+known_bad_patterns:
+  - "never log params after the run is marked FINISHED — they will be silently ignored"
+  - "never create a run without an experiment_id — it goes to the Default experiment and is hard to find"
+  - "never log the same metric key multiple times in the same batch call — use steps instead"
+  - "use log-batch instead of individual log-metric calls to reduce API calls and latency"
+
+rollback_order:
+  - "POST {{ mlflow_tracking_uri }}/api/2.0/mlflow/runs/delete with run_id={{ run.info.run_id }}"

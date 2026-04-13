@@ -1,0 +1,232 @@
+name: distributed-workloads-submit-ray-job
+description: >
+  Submit a distributed training job using Ray on ODH.
+  Creates a RayCluster, submits a RayJob, monitors until completion.
+  Requires CodeFlare + Ray to be enabled (run cluster/enable-codeflare first).
+  Kueue ResourceFlavor and ClusterQueue must exist for job queuing.
+rhoai_version_tested: null
+confidence_overall: inferred
+
+parameters:
+  - name: project_namespace
+    description: Project namespace
+    required: true
+  - name: job_name
+    description: Name for the Ray job
+    required: true
+  - name: ray_image
+    description: Ray worker image (must match Ray version)
+    required: false
+    default: "quay.io/opendatahub/workbench-images:jupyter-datascience-ubi9-python-3.11-2024.2"
+  - name: num_workers
+    description: Number of Ray workers
+    required: false
+    default: "2"
+  - name: cpu_per_worker
+    description: CPUs per worker
+    required: false
+    default: "2"
+  - name: memory_per_worker
+    description: Memory per worker
+    required: false
+    default: "4Gi"
+  - name: entrypoint
+    description: Python entrypoint command to run (e.g. 'python train.py')
+    required: true
+
+steps:
+  - id: check-codeflare-enabled
+    confidence: inferred
+    description: Verify Ray CRD is installed
+    requires:
+      - type: codeflare-enabled
+      - type: namespace
+        name: "{{ project_namespace }}"
+    pre_check:
+      command: "oc get crd rayclusters.ray.io --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      on_fail: STOP
+    action:
+      type: none
+    post_check:
+      command: "oc get crd rayclusters.ray.io --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: create-resource-flavor
+    confidence: inferred
+    description: Create Kueue ResourceFlavor for CPU workers if not present
+    pre_check:
+      command: "oc get resourceflavor default-cpu-flavor --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: kueue.x-k8s.io/v1beta1
+        kind: ResourceFlavor
+        metadata:
+          name: default-cpu-flavor
+        spec:
+          nodeLabels: {}
+    post_check:
+      command: "oc get resourceflavor default-cpu-flavor --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      timeout: "30s"
+      on_fail: STOP
+
+  - id: create-cluster-queue
+    confidence: inferred
+    description: Create Kueue ClusterQueue for job scheduling if not present
+    pre_check:
+      command: "oc get clusterqueue {{ project_namespace }}-queue --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: kueue.x-k8s.io/v1beta1
+        kind: ClusterQueue
+        metadata:
+          name: {{ project_namespace }}-queue
+        spec:
+          namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ project_namespace }}
+          resourceGroups:
+            - coveredResources: ["cpu", "memory"]
+              flavors:
+                - name: default-cpu-flavor
+                  resources:
+                    - name: cpu
+                      nominalQuota: "20"
+                    - name: memory
+                      nominalQuota: "80Gi"
+    post_check:
+      command: "oc get clusterqueue {{ project_namespace }}-queue -o jsonpath='{.status.conditions[?(@.type==\"Active\")].status}' 2>/dev/null"
+      expected: "True"
+      timeout: "60s"
+      on_fail: STOP
+
+  - id: create-local-queue
+    confidence: inferred
+    description: Create Kueue LocalQueue in the project namespace
+    pre_check:
+      command: "oc get localqueue local-queue -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: kueue.x-k8s.io/v1beta1
+        kind: LocalQueue
+        metadata:
+          name: local-queue
+          namespace: {{ project_namespace }}
+        spec:
+          clusterQueueName: {{ project_namespace }}-queue
+    post_check:
+      command: "oc get localqueue local-queue -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      timeout: "30s"
+      on_fail: STOP
+
+  - id: submit-ray-job
+    confidence: inferred
+    description: Submit RayJob for distributed execution
+    pre_check:
+      command: "oc get rayjob {{ job_name }} -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: ray.io/v1
+        kind: RayJob
+        metadata:
+          name: {{ job_name }}
+          namespace: {{ project_namespace }}
+          labels:
+            kueue.x-k8s.io/queue-name: local-queue
+        spec:
+          entrypoint: "{{ entrypoint }}"
+          shutdownAfterJobFinishes: true
+          ttlSecondsAfterFinished: 86400
+          rayClusterSpec:
+            rayVersion: "2.9.0"
+            headGroupSpec:
+              rayStartParams:
+                dashboard-host: "0.0.0.0"
+              template:
+                spec:
+                  containers:
+                    - name: ray-head
+                      image: {{ ray_image }}
+                      resources:
+                        requests:
+                          cpu: "2"
+                          memory: "4Gi"
+            workerGroupSpecs:
+              - replicas: {{ num_workers }}
+                minReplicas: 1
+                maxReplicas: {{ num_workers }}
+                groupName: worker-group
+                rayStartParams: {}
+                template:
+                  spec:
+                    containers:
+                      - name: ray-worker
+                        image: {{ ray_image }}
+                        resources:
+                          requests:
+                            cpu: "{{ cpu_per_worker }}"
+                            memory: "{{ memory_per_worker }}"
+    post_check:
+      command: "oc get rayjob {{ job_name }} -n {{ project_namespace }} -o jsonpath='{.status.jobStatus}'"
+      expected: "RUNNING"
+      timeout: "300s"
+      poll_interval: "15s"
+      on_fail: STOP
+    rollback: "oc delete rayjob {{ job_name }} -n {{ project_namespace }}"
+
+  - id: wait-job-complete
+    confidence: inferred
+    description: Wait for the Ray job to complete
+    action:
+      type: poll
+      url: "placeholder"
+      until: "response.status.jobStatus in ['SUCCEEDED', 'FAILED', 'STOPPED']"
+      timeout: "3600s"
+      poll_interval: "30s"
+    post_check:
+      command: "oc get rayjob {{ job_name }} -n {{ project_namespace }} -o jsonpath='{.status.jobStatus}'"
+      expected: "SUCCEEDED"
+      timeout: "60s"
+      on_fail: STOP
+    return: |
+      ✓ Ray job completed: {{ job_name }}
+
+      Project:    {{ project_namespace }}
+      Workers:    {{ num_workers }}x {{ cpu_per_worker }} CPU / {{ memory_per_worker }}
+      Entrypoint: {{ entrypoint }}
+
+      Dashboard: Distributed Workloads section in ODH dashboard
+
+known_bad_patterns:
+  - "never submit a RayJob without Kueue queues configured — the job will be stuck in Pending"
+  - "never use a Ray version that doesn't match the Ray image version — workers will fail to join the cluster"
+  - "never set num_workers higher than available cluster capacity — jobs will be permanently pending"
+
+rollback_order:
+  - "oc delete rayjob {{ job_name }} -n {{ project_namespace }}"
+  - "oc delete localqueue local-queue -n {{ project_namespace }}"
+  - "oc delete clusterqueue {{ project_namespace }}-queue"

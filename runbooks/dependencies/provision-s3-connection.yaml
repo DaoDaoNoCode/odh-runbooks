@@ -1,0 +1,177 @@
+name: dependencies-provision-s3-connection
+description: >
+  Auto-provision an S3 connection for a project.
+  Decision logic:
+    1. If S3 credentials provided as params → create external S3 connection
+    2. If MinIO already running on cluster → create connection pointing to MinIO
+    3. If nothing available → deploy MinIO first, then create connection
+  This runbook is the dependency resolver for 'requires: s3-connection'.
+  It runs automatically when another runbook needs an S3 connection and none exists.
+rhoai_version_tested: null
+confidence_overall: inferred
+
+parameters:
+  - name: project_namespace
+    description: Project namespace to create the S3 connection in
+    required: true
+  - name: s3_endpoint
+    description: "External S3 endpoint (leave empty to use on-cluster MinIO)"
+    required: false
+    default: ""
+  - name: s3_access_key
+    description: "External S3 access key (leave empty to use on-cluster MinIO)"
+    required: false
+    default: ""
+  - name: s3_secret_key
+    description: "External S3 secret key (leave empty to use on-cluster MinIO)"
+    required: false
+    default: ""
+  - name: s3_bucket
+    description: "S3 bucket name (will be created in MinIO if on-cluster)"
+    required: false
+    default: odh-pipelines
+  - name: connection_name
+    description: Name for the ODH S3 connection secret
+    required: false
+    default: odh-s3-connection
+  - name: minio_namespace
+    description: Namespace where MinIO is/should-be deployed (if using on-cluster)
+    required: false
+    default: minio
+
+steps:
+  - id: check-existing-connection
+    confidence: doc-derived
+    description: Check if an S3 connection already exists (idempotent guard)
+    requires:
+      - type: namespace
+        name: "{{ project_namespace }}"
+    pre_check:
+      command: "oc get secret -n {{ project_namespace }} -l opendatahub.io/connection-type=s3 --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: none
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "5s"
+      on_fail: STOP
+
+  - id: detect-s3-source
+    confidence: inferred
+    description: Determine S3 source — external credentials or on-cluster MinIO
+    action:
+      type: query
+      command: |
+        if [ -n "{{ s3_endpoint }}" ] && [ -n "{{ s3_access_key }}" ]; then
+          echo "external"
+        elif oc get deployment minio -n {{ minio_namespace }} --no-headers 2>/dev/null | grep -q .; then
+          echo "minio-existing"
+        else
+          echo "minio-new"
+        fi
+      store_as: s3_source
+    post_check:
+      assert: s3_source is not empty
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: deploy-minio-if-needed
+    confidence: inferred
+    description: Deploy on-cluster MinIO if no external S3 and no existing MinIO
+    pre_check:
+      command: "[ '{{ s3_source }}' = 'minio-new' ] && echo needed || echo skip"
+      expected: "needed"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: none
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "5s"
+      on_fail: STOP
+
+  - id: get-minio-credentials
+    confidence: inferred
+    description: Resolve MinIO endpoint and credentials (from existing or newly deployed MinIO)
+    action:
+      type: query
+      command: |
+        if [ "{{ s3_source }}" = "external" ]; then
+          echo "{{ s3_endpoint }}|{{ s3_access_key }}|{{ s3_secret_key }}|{{ s3_bucket }}"
+        else
+          MINIO_HOST=$(oc get route minio-api -n {{ minio_namespace }} -o jsonpath='{.spec.host}' 2>/dev/null)
+          MINIO_USER=$(oc get secret minio-secret -n {{ minio_namespace }} -o jsonpath='{.data.minio_root_user}' 2>/dev/null | base64 -d)
+          MINIO_PASS=$(oc get secret minio-secret -n {{ minio_namespace }} -o jsonpath='{.data.minio_root_password}' 2>/dev/null | base64 -d)
+          echo "https://${MINIO_HOST}|${MINIO_USER}|${MINIO_PASS}|{{ s3_bucket }}"
+        fi
+      store_as: s3_creds_raw
+    post_check:
+      assert: s3_creds_raw is not empty
+      command: "echo ok"
+      expected: "ok"
+      timeout: "15s"
+      on_fail: STOP
+
+  - id: create-s3-connection-secret
+    confidence: doc-derived
+    description: Create ODH S3 connection secret in project namespace
+    pre_check:
+      command: "oc get secret {{ connection_name }} -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: query
+      command: |
+        ENDPOINT=$(echo "{{ s3_creds_raw }}" | cut -d'|' -f1)
+        ACCESS_KEY=$(echo "{{ s3_creds_raw }}" | cut -d'|' -f2)
+        SECRET_KEY=$(echo "{{ s3_creds_raw }}" | cut -d'|' -f3)
+        BUCKET=$(echo "{{ s3_creds_raw }}" | cut -d'|' -f4)
+        oc apply -f - <<EOF
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: {{ connection_name }}
+          namespace: {{ project_namespace }}
+          labels:
+            opendatahub.io/dashboard: "true"
+            opendatahub.io/managed: "true"
+          annotations:
+            opendatahub.io/connection-type: s3
+            openshift.io/display-name: "Auto-provisioned S3 ({{ s3_source }})"
+        type: Opaque
+        stringData:
+          AWS_ACCESS_KEY_ID: "${ACCESS_KEY}"
+          AWS_SECRET_ACCESS_KEY: "${SECRET_KEY}"
+          AWS_S3_ENDPOINT: "${ENDPOINT}"
+          AWS_DEFAULT_REGION: "us-east-1"
+          AWS_S3_BUCKET: "${BUCKET}"
+        EOF
+      store_as: connection_result
+    post_check:
+      command: "oc get secret {{ connection_name }} -n {{ project_namespace }} -o jsonpath='{.metadata.annotations.opendatahub\\.io/connection-type}'"
+      expected: "s3"
+      timeout: "30s"
+      on_fail: STOP
+    rollback: "oc delete secret {{ connection_name }} -n {{ project_namespace }}"
+    return: |
+      ✓ S3 connection created: {{ connection_name }}
+
+      Project:   {{ project_namespace }}
+      Source:    {{ s3_source }}
+      Bucket:    {{ s3_bucket }}
+
+      The original runbook can now continue.
+
+known_bad_patterns:
+  - "never use auto-provisioned MinIO credentials in production pipelines"
+  - "never leave default minio/minio123 credentials in a production cluster"
+
+rollback_order:
+  - "oc delete secret {{ connection_name }} -n {{ project_namespace }}"

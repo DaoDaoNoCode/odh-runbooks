@@ -1,0 +1,124 @@
+name: dependencies-provision-pipeline-server
+description: >
+  Auto-provision a Data Science Pipelines Application (DSPA) in a project.
+  This is the dependency resolver for 'requires: pipeline-server'.
+  First ensures an S3 connection exists (triggers its own resolver if not),
+  then creates the DSPA using that connection.
+rhoai_version_tested: null
+confidence_overall: inferred
+
+parameters:
+  - name: project_namespace
+    description: Project namespace to create pipeline server in
+    required: true
+
+steps:
+  - id: ensure-dsp-enabled
+    confidence: doc-derived
+    description: Verify DSP is enabled at cluster level (auto-enables if not)
+    requires:
+      - type: dsp-enabled
+    pre_check:
+      command: "oc get dsc -o jsonpath='{.items[0].spec.components.datasciencepipelines.managementState}'"
+      expected: "Managed"
+      on_fail: STOP
+    action:
+      type: none
+    post_check:
+      command: "oc get dsc -o jsonpath='{.items[0].spec.components.datasciencepipelines.managementState}'"
+      expected: "Managed"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: ensure-s3-connection
+    confidence: inferred
+    description: Ensure S3 connection exists (auto-provisions MinIO if needed)
+    requires:
+      - type: s3-connection
+        namespace: "{{ project_namespace }}"
+        params:
+          project_namespace: "{{ project_namespace }}"
+    action:
+      type: query
+      command: "oc get secret -n {{ project_namespace }} -l opendatahub.io/connection-type=s3 -o jsonpath='{.items[0].metadata.name}'"
+      store_as: s3_connection_name
+    post_check:
+      assert: s3_connection_name is not empty
+      command: "oc get secret -n {{ project_namespace }} -l opendatahub.io/connection-type=s3 -o jsonpath='{.items[0].metadata.name}'"
+      expected_min: 1
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: get-s3-details
+    confidence: inferred
+    description: Read S3 bucket and endpoint from the connection secret
+    action:
+      type: query
+      command: |
+        BUCKET=$(oc get secret {{ s3_connection_name }} -n {{ project_namespace }} -o jsonpath='{.data.AWS_S3_BUCKET}' | base64 -d)
+        ENDPOINT=$(oc get secret {{ s3_connection_name }} -n {{ project_namespace }} -o jsonpath='{.data.AWS_S3_ENDPOINT}' | base64 -d)
+        echo "${ENDPOINT}|${BUCKET}"
+      store_as: s3_details
+    post_check:
+      assert: s3_details is not empty
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: create-dspa
+    confidence: inferred
+    description: Create pipeline server using the discovered S3 connection
+    pre_check:
+      command: "oc get dspa -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: datasciencepipelinesapplications.opendatahub.io/v1alpha1
+        kind: DataSciencePipelinesApplication
+        metadata:
+          name: pipelines-definition
+          namespace: {{ project_namespace }}
+        spec:
+          apiServer:
+            deploy: true
+            enableSamplePipeline: false
+          database:
+            mariaDB:
+              deploy: true
+              pvcSize: 10Gi
+          objectStorage:
+            externalStorage:
+              bucket: "{{ s3_details.split('|')[1] }}"
+              host: "{{ s3_details.split('|')[0] }}"
+              port: ""
+              region: us-east-1
+              s3CredentialsSecret:
+                accessKey: AWS_ACCESS_KEY_ID
+                secretKey: AWS_SECRET_ACCESS_KEY
+                secretName: {{ s3_connection_name }}
+              scheme: https
+    post_check:
+      command: "oc get dspa -n {{ project_namespace }} -o jsonpath='{.items[0].status.conditions[?(@.type==\"APIServerReady\")].status}' 2>/dev/null"
+      expected: "True"
+      timeout: "600s"
+      poll_interval: "20s"
+      on_fail: STOP
+    rollback: "oc delete dspa pipelines-definition -n {{ project_namespace }}"
+    return: |
+      ✓ Pipeline server auto-provisioned in {{ project_namespace }}.
+
+      S3 connection: {{ s3_connection_name }}
+      Bucket: {{ s3_details }}
+
+      The original runbook can now continue.
+
+known_bad_patterns:
+  - "never create a DSPA without an S3 connection — it is auto-resolved before reaching this step"
+
+rollback_order:
+  - "oc delete dspa pipelines-definition -n {{ project_namespace }}"

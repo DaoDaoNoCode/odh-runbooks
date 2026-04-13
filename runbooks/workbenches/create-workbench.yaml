@@ -1,0 +1,267 @@
+name: workbenches-create-workbench
+description: >
+  Create a Jupyter notebook workbench in a Data Science Project.
+  Workbenches are Kubeflow Notebook CRs (kubeflow.org/v1).
+  Uses the EXACT same labels, annotations, volumes and probes as the ODH dashboard.
+  CRITICAL: notebooks.opendatahub.io/inject-auth (not inject-oauth) controls OAuth proxy injection.
+  CRITICAL: NOTEBOOK_ARGS must include --ServerApp.base_url=/notebook/{namespace}/{name} for routing.
+rhoai_version_tested: null
+confidence_overall: doc-derived
+
+parameters:
+  - name: project_namespace
+    description: Data Science Project namespace to create the workbench in
+    required: true
+    discover_cmd: "oc get namespace -l opendatahub.io/dashboard=true --no-headers -o jsonpath='{.items[*].metadata.name}'"
+    hint: "Must be an existing ODH Data Science Project. Create one first with: odh run projects/create-project"
+    example: "my-data-science-project"
+  - name: workbench_name
+    description: Name for the workbench (used as both resource name and display)
+    required: true
+    example: "my-notebook"
+    hint: "Lowercase letters, numbers, hyphens. No spaces. Max 63 chars."
+  - name: notebook_image
+    description: Full notebook image URI
+    required: false
+    default: "quay.io/opendatahub/workbench-images:jupyter-datascience-ubi9-python-3.12-latest"
+    enum:
+      - "quay.io/opendatahub/workbench-images:jupyter-minimal-ubi9-python-3.12-latest"
+      - "quay.io/opendatahub/workbench-images:jupyter-datascience-ubi9-python-3.12-latest"
+      - "quay.io/opendatahub/workbench-images:jupyter-pytorch-ubi9-python-3.12-latest"
+      - "quay.io/opendatahub/workbench-images:jupyter-tensorflow-ubi9-python-3.12-latest"
+      - "quay.io/opendatahub/workbench-images:jupyter-trustyai-ubi9-python-3.12-latest"
+      - "quay.io/opendatahub/workbench-images:codeserver-ubi9-python-3.12-latest"
+    hint: "Pick: minimal (lean), datascience (pandas/sklearn), pytorch (ML), tensorflow (ML), trustyai (fairness), codeserver (VS Code)."
+  - name: display_name
+    description: Human-readable display name shown in dashboard
+    required: false
+    default: "{{ workbench_name }}"
+    hint: "Can contain spaces and capitals, unlike the resource name"
+  - name: pvc_size
+    description: Persistent storage size for your notebook files and data
+    required: false
+    default: "20Gi"
+    enum: ["5Gi", "10Gi", "20Gi", "50Gi", "100Gi"]
+    hint: "20Gi is a good default. Increase if you'll be downloading large datasets or models."
+  - name: cpu_request
+    description: CPU request
+    required: false
+    default: "1"
+    hint: "Small=1, Medium=3, Large=7, XLarge=15. Must match memory_request size tier."
+    enum: ["1", "3", "7", "15"]
+  - name: memory_request
+    description: Memory request
+    required: false
+    default: "8Gi"
+    hint: "Small=8Gi, Medium=24Gi, Large=56Gi, XLarge=120Gi. Pick the tier that fits your workload."
+    enum: ["8Gi", "24Gi", "56Gi", "120Gi"]
+  - name: size_selection
+    description: "Size label (must match cpu/memory values)"
+    required: false
+    default: "Small"
+    enum: ["Small", "Medium", "Large", "X Large"]
+    hint: "Small=1CPU/8Gi, Medium=3CPU/24Gi, Large=7CPU/56Gi, X Large=15CPU/120Gi"
+
+steps:
+  - id: check-namespace-exists
+    confidence: doc-derived
+    description: Verify project namespace exists (auto-creates if missing via requires)
+    requires:
+      - type: namespace
+        name: "{{ project_namespace }}"
+      - type: storage-class
+    pre_check:
+      command: "oc get namespace {{ project_namespace }} -o jsonpath='{.status.phase}'"
+      expected: "Active"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: none
+    post_check:
+      command: "oc get namespace {{ project_namespace }} -o jsonpath='{.status.phase}'"
+      expected: "Active"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: create-workbench-pvc
+    confidence: doc-derived
+    description: Create PVC for workbench persistent storage
+    pre_check:
+      command: "oc get pvc {{ workbench_name }} -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: v1
+        kind: PersistentVolumeClaim
+        metadata:
+          name: {{ workbench_name }}
+          namespace: {{ project_namespace }}
+          labels:
+            opendatahub.io/dashboard: "true"
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: {{ pvc_size }}
+    post_check:
+      command: "oc get pvc {{ workbench_name }} -n {{ project_namespace }} -o jsonpath='{.status.phase}'"
+      expected: "Bound"
+      timeout: "120s"
+      poll_interval: "10s"
+      on_fail: STOP
+    rollback: "oc delete pvc {{ workbench_name }} -n {{ project_namespace }}"
+
+  - id: create-notebook
+    confidence: doc-derived
+    description: >
+      Create Kubeflow Notebook CR matching EXACTLY what the dashboard creates.
+      Key facts from dashboard source:
+      - inject-auth (NOT inject-oauth) controls OAuth sidecar injection
+      - NOTEBOOK_ARGS must include --ServerApp.base_url=/notebook/{ns}/{name}
+      - odh-managed: true label required for dashboard listing
+      - shm emptyDir volume is always injected by dashboard
+      - liveness/readiness probes point to /notebook/{ns}/{name}/api
+    pre_check:
+      command: "oc get notebook {{ workbench_name }} -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: kubeflow.org/v1
+        kind: Notebook
+        metadata:
+          name: {{ workbench_name }}
+          namespace: {{ project_namespace }}
+          labels:
+            app: {{ workbench_name }}
+            opendatahub.io/dashboard: "true"
+            opendatahub.io/odh-managed: "true"
+          annotations:
+            openshift.io/display-name: "{{ display_name }}"
+            openshift.io/description: ""
+            notebooks.opendatahub.io/inject-auth: "true"
+            notebooks.opendatahub.io/last-image-selection: "{{ notebook_image }}"
+            notebooks.opendatahub.io/last-size-selection: "{{ size_selection }}"
+        spec:
+          template:
+            spec:
+              enableServiceLinks: false
+              containers:
+                - name: {{ workbench_name }}
+                  image: {{ notebook_image }}
+                  imagePullPolicy: Always
+                  workingDir: /opt/app-root/src
+                  ports:
+                    - name: notebook-port
+                      containerPort: 8888
+                      protocol: TCP
+                  env:
+                    - name: NOTEBOOK_ARGS
+                      value: >-
+                        --ServerApp.port=8888
+                        --ServerApp.token=''
+                        --ServerApp.password=''
+                        --ServerApp.base_url=/notebook/{{ project_namespace }}/{{ workbench_name }}
+                        --ServerApp.quit_button=False
+                    - name: JUPYTER_IMAGE
+                      value: "{{ notebook_image }}"
+                  resources:
+                    requests:
+                      cpu: "{{ cpu_request }}"
+                      memory: "{{ memory_request }}"
+                    limits:
+                      cpu: "{{ cpu_request }}"
+                      memory: "{{ memory_request }}"
+                  livenessProbe:
+                    httpGet:
+                      path: /notebook/{{ project_namespace }}/{{ workbench_name }}/api
+                      port: notebook-port
+                      scheme: HTTP
+                    initialDelaySeconds: 10
+                    periodSeconds: 5
+                    timeoutSeconds: 1
+                    successThreshold: 1
+                    failureThreshold: 3
+                  readinessProbe:
+                    httpGet:
+                      path: /notebook/{{ project_namespace }}/{{ workbench_name }}/api
+                      port: notebook-port
+                      scheme: HTTP
+                    initialDelaySeconds: 10
+                    periodSeconds: 5
+                    timeoutSeconds: 1
+                    successThreshold: 1
+                    failureThreshold: 3
+                  volumeMounts:
+                    - name: {{ workbench_name }}
+                      mountPath: /opt/app-root/src
+                    - name: shm
+                      mountPath: /dev/shm
+              volumes:
+                - name: {{ workbench_name }}
+                  persistentVolumeClaim:
+                    claimName: {{ workbench_name }}
+                - name: shm
+                  emptyDir:
+                    medium: Memory
+    post_check:
+      command: "oc get notebook {{ workbench_name }} -n {{ project_namespace }} -o jsonpath='{.status.conditions[?(@.type==\"Running\")].status}'"
+      expected: "True"
+      timeout: "300s"
+      poll_interval: "15s"
+      on_fail: STOP
+    rollback: "oc delete notebook {{ workbench_name }} -n {{ project_namespace }}"
+
+  - id: get-workbench-url
+    confidence: doc-derived
+    description: Get the workbench route URL
+    action:
+      type: query
+      command: "oc get route {{ workbench_name }} -n {{ project_namespace }} -o jsonpath='{.spec.host}' 2>/dev/null"
+      store_as: workbench_host
+    post_check:
+      command: "oc get route {{ workbench_name }} -n {{ project_namespace }} -o jsonpath='{.spec.host}'"
+      expected_min: 1
+      timeout: "60s"
+      on_fail: STOP
+    return: |
+      ✓ Workbench created: {{ workbench_name }}
+
+      Project:   {{ project_namespace }}
+      Image:     {{ notebook_image }}
+      Size:      {{ size_selection }} ({{ cpu_request }} CPU / {{ memory_request }})
+      Storage:   {{ pvc_size }}
+
+      Direct URL:  https://{{ workbench_host }}/notebook/{{ project_namespace }}/{{ workbench_name }}
+      Dashboard:   Projects → {{ project_namespace }} → Workbenches → {{ workbench_name }} → Open
+
+      Size profiles (dashboard standard):
+        Small:   1 CPU,  8Gi RAM
+        Medium:  3 CPU, 24Gi RAM
+        Large:   7 CPU, 56Gi RAM
+        X Large: 15 CPU, 120Gi RAM
+
+known_bad_patterns:
+  - "CRITICAL: never use notebooks.opendatahub.io/inject-oauth — the correct annotation is inject-auth"
+  - "CRITICAL: NOTEBOOK_ARGS must include --ServerApp.base_url=/notebook/{namespace}/{name} — without it the notebook URL routing breaks"
+  - "never omit the shm emptyDir volume — dashboard always injects it, its absence causes rendering mismatch"
+  - "never omit opendatahub.io/odh-managed: true label — dashboard uses it to list workbenches"
+  - "never set cpu/memory limit lower than request — pod will be evicted immediately"
+
+rollback_order:
+  - "oc delete notebook {{ workbench_name }} -n {{ project_namespace }}"
+  - "oc delete pvc {{ workbench_name }} -n {{ project_namespace }}"
+
+tags: ["beginner","workbench"]
+estimated_minutes: 5
+next_steps:
+  - "Open in dashboard: Projects → your-project → Workbenches → Open"
+  - "Connect S3 storage: odh wizard projects/create-s3-connection"

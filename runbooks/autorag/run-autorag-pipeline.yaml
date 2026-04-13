@@ -1,0 +1,158 @@
+name: autorag-run-pipeline
+description: >
+  Run an AutoRAG pipeline to automatically optimize RAG (Retrieval Augmented Generation) parameters.
+  AutoRAG uses ai4rag with Hierarchical Multi-Armed Bandit (Hier-MAB) optimization.
+  Tunes: chunk_size, overlap, top_k, embedding_model, retrieval_method, prompt_compression.
+  Requires: DSP pipeline server, an LLM endpoint, evaluation dataset in S3.
+rhoai_version_tested: null
+confidence_overall: inferred
+
+parameters:
+  - name: project_namespace
+    description: Project namespace with running pipeline server
+    required: true
+  - name: llm_endpoint
+    description: "OpenAI-compatible LLM endpoint URL (e.g. from vLLM deployment)"
+    required: true
+  - name: evaluation_dataset_uri
+    description: S3 URI for the RAG evaluation dataset (JSON with questions + ground truth)
+    required: true
+  - name: document_corpus_uri
+    description: S3 URI for the document corpus to index
+    required: true
+  - name: embedding_model
+    description: Embedding model to use for document indexing
+    required: false
+    default: sentence-transformers/all-MiniLM-L6-v2
+  - name: quality_target
+    description: Target Recall@K score (0.0-1.0)
+    required: false
+    default: "0.85"
+  - name: max_iterations
+    description: Maximum optimization iterations
+    required: false
+    default: "50"
+
+steps:
+  - id: check-llm-endpoint
+    confidence: inferred
+    description: Verify LLM endpoint is reachable
+    requires:
+      - type: dsp-enabled
+      - type: namespace
+        name: "{{ project_namespace }}"
+      - type: pipeline-server
+        namespace: "{{ project_namespace }}"
+    pre_check:
+      command: "curl -sf {{ llm_endpoint }}/v1/models > /dev/null && echo ok || echo fail"
+      expected: "ok"
+      on_fail: STOP
+    action:
+      type: none
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: get-pipeline-api-url
+    confidence: inferred
+    description: Get DSP API server route
+    action:
+      type: query
+      command: "oc get route -n {{ project_namespace }} -l app=ds-pipeline -o jsonpath='{.items[0].spec.host}' 2>/dev/null"
+      store_as: pipeline_api_host
+    post_check:
+      assert: pipeline_api_host is not empty
+      command: "oc get route -n {{ project_namespace }} -l app=ds-pipeline -o jsonpath='{.items[0].spec.host}'"
+      expected_min: 1
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: get-token
+    confidence: doc-derived
+    description: Get auth token
+    action:
+      type: query
+      command: "oc whoami -t"
+      store_as: oc_token
+    post_check:
+      assert: oc_token is not empty
+      command: "oc whoami -t"
+      expected_min: 1
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: submit-autorag-run
+    confidence: inferred
+    description: Submit AutoRAG optimization pipeline run
+    action:
+      type: api_call
+      method: POST
+      url: "https://{{ pipeline_api_host }}/apis/v2beta1/runs"
+      headers:
+        Content-Type: "application/json"
+        Authorization: "Bearer {{ oc_token }}"
+      body: |
+        {
+          "display_name": "autorag-optimization-run",
+          "description": "AutoRAG parameter optimization",
+          "namespace": "{{ project_namespace }}",
+          "runtime_config": {
+            "parameters": {
+              "llm_endpoint": "{{ llm_endpoint }}",
+              "evaluation_dataset": "{{ evaluation_dataset_uri }}",
+              "document_corpus": "{{ document_corpus_uri }}",
+              "embedding_model": "{{ embedding_model }}",
+              "quality_target": "{{ quality_target }}",
+              "max_iterations": "{{ max_iterations }}",
+              "retrieval_methods": "dense,sparse,hybrid",
+              "chunk_sizes": "256,512,1024",
+              "top_k_range": "3,5,10,20"
+            }
+          }
+        }
+      store_response_as: autorag_run
+    post_check:
+      assert: autorag_run is not empty
+      command: "echo ok"
+      expected: "ok"
+      timeout: "15s"
+      on_fail: STOP
+    return: |
+      ✓ AutoRAG optimization pipeline submitted.
+
+      Run ID:     {{ autorag_run.run_id }}
+      LLM:        {{ llm_endpoint }}
+      Target:     Recall@K ≥ {{ quality_target }}
+      Iterations: {{ max_iterations }}
+
+      Monitor: Projects → {{ project_namespace }} → Pipelines → Runs
+
+      ─────────────────────────────────────────────────────
+      AutoRAG optimizes these parameters simultaneously:
+        - chunk_size:       How to split documents (256-1024 tokens)
+        - overlap:          Overlap between chunks (0-50%)
+        - top_k:            Documents to retrieve per query (3-20)
+        - embedding_model:  Which model to vectorize documents
+        - retrieval_method: dense | sparse | hybrid
+        - prompt_compression_ratio: Compress context (0.0-1.0)
+
+      Metrics computed:
+        - Recall@K:  Were relevant docs retrieved?
+        - MRR:       Was the top doc relevant?
+        - NDCG:      Quality of document ranking
+        - Latency:   Per-query response time
+
+      Output: Optimal RAG config + MLflow experiment with all results
+      Cost: ~20% of grid search (Hier-MAB is efficient)
+      ─────────────────────────────────────────────────────
+
+known_bad_patterns:
+  - "never run AutoRAG without a ground-truth evaluation dataset — it cannot optimize without feedback"
+  - "never set max_iterations < 20 — the optimizer needs enough trials to converge"
+  - "never use an embedding model that requires GPU if no GPU nodes exist"
+  - "never point to an LLM endpoint that requires API key without configuring the secret"
+
+rollback_order:
+  - "POST https://{{ pipeline_api_host }}/apis/v2beta1/runs/{{ autorag_run.run_id }}:cancel"

@@ -1,0 +1,127 @@
+name: gpu-add-gpu-node-ocm
+description: >
+  Add a GPU worker node to a ROSA/OSD cluster via OpenShift Cluster Manager (OCM).
+  Uses the 'ocm' CLI to create a MachinePool with GPU instance types.
+  For self-managed OpenShift, use the MachineSet approach instead (see known_bad_patterns).
+  NOTE: confidence is 'uncertain' — OCM API changes frequently, verify instance types for your region.
+rhoai_version_tested: null
+confidence_overall: uncertain
+
+parameters:
+  - name: cluster_name
+    description: OCM cluster name or ID
+    required: true
+  - name: instance_type
+    description: "GPU instance type (AWS: g4dn.xlarge, g5.xlarge, p3.2xlarge — GCP: n1-standard-4+nvidia-tesla-t4)"
+    required: false
+    default: g4dn.xlarge
+  - name: gpu_node_count
+    description: Number of GPU nodes to add
+    required: false
+    default: "1"
+  - name: machinepool_name
+    description: Name for the machine pool
+    required: false
+    default: gpu-pool
+
+steps:
+  - id: check-ocm-cli-installed
+    confidence: uncertain
+    description: Verify ocm CLI is installed and logged in
+    requires:
+      - type: openshift-cluster
+    pre_check:
+      command: "ocm whoami 2>/dev/null | grep -c 'id' || echo 0"
+      expected_min: 1
+      on_fail: STOP
+    action:
+      type: none
+    post_check:
+      command: "ocm whoami 2>/dev/null | grep -c 'id' || echo 0"
+      expected_min: 1
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: verify-cluster-exists
+    confidence: uncertain
+    description: Verify the cluster exists in OCM
+    action:
+      type: query
+      command: "ocm list clusters --parameter search=\"name='{{ cluster_name }}'\" --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      store_as: cluster_count
+    post_check:
+      assert: cluster_count is not empty
+      command: "ocm list clusters --parameter search=\"name='{{ cluster_name }}'\" --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "30s"
+      on_fail: STOP
+
+  - id: check-existing-gpu-pool
+    confidence: uncertain
+    description: Check if a GPU machine pool already exists
+    pre_check:
+      command: "ocm list machinepools --cluster {{ cluster_name }} 2>/dev/null | grep -c '{{ machinepool_name }}' || echo 0"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: none
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "5s"
+      on_fail: STOP
+
+  - id: create-gpu-machinepool
+    confidence: uncertain
+    description: Create GPU machine pool via OCM CLI
+    action:
+      type: query
+      command: >
+        ocm create machinepool
+        --cluster {{ cluster_name }}
+        --name {{ machinepool_name }}
+        --instance-type {{ instance_type }}
+        --replicas {{ gpu_node_count }}
+        --labels node-role.kubernetes.io/gpu=
+        --taints nvidia.com/gpu=:NoSchedule
+      store_as: machinepool_result
+    post_check:
+      command: "ocm list machinepools --cluster {{ cluster_name }} 2>/dev/null | grep -c '{{ machinepool_name }}' || echo 0"
+      expected_min: 1
+      timeout: "30s"
+      on_fail: STOP
+    rollback: "ocm delete machinepool --cluster {{ cluster_name }} {{ machinepool_name }}"
+
+  - id: wait-nodes-ready
+    confidence: uncertain
+    description: Wait for new GPU nodes to join and become Ready (can take 10-15 minutes)
+    action:
+      type: wait
+      command: "oc wait nodes -l node-role.kubernetes.io/gpu= --for=condition=Ready --timeout=900s"
+    post_check:
+      command: "oc get nodes -l node-role.kubernetes.io/gpu= --no-headers 2>/dev/null | grep -c ' Ready ' || echo 0"
+      expected_min: 1
+      timeout: "900s"
+      poll_interval: "30s"
+      on_fail: STOP
+    return: |
+      ✓ GPU node(s) added to cluster.
+
+      Cluster:       {{ cluster_name }}
+      Machine pool:  {{ machinepool_name }}
+      Instance type: {{ instance_type }}
+      Node count:    {{ gpu_node_count }}
+
+      Next step: Install GPU Operator
+        odh run gpu/install-gpu-operator
+
+known_bad_patterns:
+  - "never use this runbook for self-managed OpenShift — use oc create machineset instead (different API)"
+  - "never create a GPU machinepool without the nvidia.com/gpu=:NoSchedule taint — non-GPU workloads will be scheduled on expensive GPU nodes"
+  - "never use p3.8xlarge or larger without checking your cluster's service limit first — provisioning will fail silently"
+  - "never skip install-gpu-operator after adding GPU nodes — the nodes will not expose nvidia.com/gpu resource"
+  - "never add GPU nodes to a cluster that has reached its node limit — check OCM cluster limits first"
+
+rollback_order:
+  - "ocm delete machinepool --cluster {{ cluster_name }} {{ machinepool_name }}"

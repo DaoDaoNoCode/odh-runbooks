@@ -1,0 +1,343 @@
+name: cluster-full-stack-setup
+description: >
+  Complete ODH/RHOAI stack setup from a fresh cluster.
+  This is the master runbook that calls everything else in the correct order.
+  Run this once on a fresh cluster to get every dashboard page in a usable state.
+  Estimated time: 15-30 minutes depending on cluster speed.
+rhoai_version_tested: null
+confidence_overall: inferred
+
+parameters:
+  - name: dev_project
+    description: Main development project namespace to create
+    required: false
+    default: odh-dev
+  - name: s3_endpoint
+    description: S3-compatible storage endpoint
+    required: true
+  - name: s3_access_key
+    description: S3 access key ID
+    required: true
+  - name: s3_secret_key
+    description: S3 secret access key
+    required: true
+  - name: s3_bucket
+    description: S3 bucket name (must already exist)
+    required: true
+
+steps:
+  - id: verify-odh-installed
+    confidence: doc-derived
+    description: Verify ODH/RHOAI operator is running
+    requires:
+      - type: dsc-exists
+      - type: storage-class
+      - type: openshift-cluster
+    pre_check:
+      command: "oc get dsc --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      on_fail: STOP
+    action:
+      type: none
+    post_check:
+      command: "oc get dsc --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: enable-all-components
+    confidence: doc-derived
+    description: Enable all major components in DataScienceCluster at once
+    action:
+      type: patch
+      target: "$(oc get dsc -o name | head -1)"
+      patch: >
+        {"spec":{"components":{
+          "kserve":{"managementState":"Managed","serving":{"managementState":"Managed","ingressGateway":{"certificate":{"type":"SelfSigned"}}}},
+          "datasciencepipelines":{"managementState":"Managed"},
+          "modelregistry":{"managementState":"Managed","registriesNamespace":"odh-model-registries"},
+          "trustyai":{"managementState":"Managed","eval":{"lmeval":{"permitCodeExecution":"allow","permitOnline":"allow"}}},
+          "trainingoperator":{"managementState":"Managed"},
+          "workbenches":{"managementState":"Managed"},
+          "dashboard":{"managementState":"Managed"},
+          "codeflare":{"managementState":"Managed"},
+          "ray":{"managementState":"Managed"},
+          "kueue":{"managementState":"Managed"},
+          "feastoperator":{"managementState":"Managed"},
+          "modelmeshserving":{"managementState":"Managed"}
+        }}}
+      dry_run: false
+    post_check:
+      command: "oc get dsc -o jsonpath='{.items[0].spec.components.kserve.managementState}'"
+      expected: "Managed"
+      timeout: "60s"
+      on_fail: STOP
+
+  - id: wait-components-ready
+    confidence: inferred
+    description: Wait for all critical components to be ready (up to 10 minutes)
+    action:
+      type: wait
+      command: "oc wait dsc --all --for=condition=Ready --timeout=600s"
+    post_check:
+      command: "oc get dsc -o jsonpath='{.items[0].status.conditions[?(@.type==\"Ready\")].status}' 2>/dev/null"
+      expected: "True"
+      timeout: "600s"
+      poll_interval: "30s"
+      on_fail: STOP
+
+  - id: create-dev-project
+    confidence: inferred
+    description: Create development project namespace
+    pre_check:
+      command: "oc get namespace {{ dev_project }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: {{ dev_project }}
+          annotations:
+            openshift.io/display-name: "ODH Development"
+          labels:
+            opendatahub.io/dashboard: "true"
+    post_check:
+      command: "oc get namespace {{ dev_project }} -o jsonpath='{.status.phase}'"
+      expected: "Active"
+      timeout: "30s"
+      on_fail: STOP
+
+  - id: create-s3-connection
+    confidence: doc-derived
+    description: Create S3 data connection in dev project
+    pre_check:
+      command: "oc get secret odh-dev-s3 -n {{ dev_project }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: odh-dev-s3
+          namespace: {{ dev_project }}
+          labels:
+            opendatahub.io/dashboard: "true"
+            opendatahub.io/managed: "true"
+          annotations:
+            opendatahub.io/connection-type: "s3"
+            openshift.io/display-name: "Dev S3 Storage"
+        type: Opaque
+        stringData:
+          AWS_ACCESS_KEY_ID: "{{ s3_access_key }}"
+          AWS_SECRET_ACCESS_KEY: "{{ s3_secret_key }}"
+          AWS_S3_ENDPOINT: "{{ s3_endpoint }}"
+          AWS_DEFAULT_REGION: "us-east-1"
+          AWS_S3_BUCKET: "{{ s3_bucket }}"
+    post_check:
+      command: "oc get secret odh-dev-s3 -n {{ dev_project }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      timeout: "30s"
+      on_fail: STOP
+
+  - id: create-pipeline-server
+    confidence: inferred
+    description: Create pipeline server in dev project
+    pre_check:
+      command: "oc get dspa -n {{ dev_project }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: datasciencepipelinesapplications.opendatahub.io/v1alpha1
+        kind: DataSciencePipelinesApplication
+        metadata:
+          name: pipelines-definition
+          namespace: {{ dev_project }}
+        spec:
+          apiServer:
+            deploy: true
+            enableSamplePipeline: false
+          database:
+            mariaDB:
+              deploy: true
+              pvcSize: 10Gi
+          objectStorage:
+            externalStorage:
+              bucket: {{ s3_bucket }}
+              host: "{{ s3_endpoint }}"
+              port: ""
+              region: us-east-1
+              s3CredentialsSecret:
+                accessKey: AWS_ACCESS_KEY_ID
+                secretKey: AWS_SECRET_ACCESS_KEY
+                secretName: odh-dev-s3
+              scheme: https
+    post_check:
+      command: "oc get dspa pipelines-definition -n {{ dev_project }} -o jsonpath='{.status.conditions[?(@.type==\"APIServerReady\")].status}' 2>/dev/null"
+      expected: "True"
+      timeout: "600s"
+      poll_interval: "20s"
+      on_fail: STOP
+
+  - id: create-hardware-profiles
+    confidence: inferred
+    description: Create standard hardware profiles (Small, Medium, Large)
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: dashboard.opendatahub.io/v1
+        kind: HardwareProfile
+        metadata:
+          name: small
+          namespace: redhat-ods-applications
+          annotations:
+            opendatahub.io/display-name: "Small (1 CPU, 2Gi)"
+            opendatahub.io/disabled: "false"
+        spec:
+          identifiers:
+            - identifier: cpu
+              defaultCount: "1"
+              maxCount: "1"
+            - identifier: memory
+              defaultCount: 2Gi
+              maxCount: 2Gi
+        ---
+        apiVersion: dashboard.opendatahub.io/v1
+        kind: HardwareProfile
+        metadata:
+          name: medium
+          namespace: redhat-ods-applications
+          annotations:
+            opendatahub.io/display-name: "Medium (2 CPU, 8Gi)"
+            opendatahub.io/disabled: "false"
+        spec:
+          identifiers:
+            - identifier: cpu
+              defaultCount: "2"
+              maxCount: "4"
+            - identifier: memory
+              defaultCount: 8Gi
+              maxCount: 16Gi
+        ---
+        apiVersion: dashboard.opendatahub.io/v1
+        kind: HardwareProfile
+        metadata:
+          name: large
+          namespace: redhat-ods-applications
+          annotations:
+            opendatahub.io/display-name: "Large (4 CPU, 16Gi)"
+            opendatahub.io/disabled: "false"
+        spec:
+          identifiers:
+            - identifier: cpu
+              defaultCount: "4"
+              maxCount: "8"
+            - identifier: memory
+              defaultCount: 16Gi
+              maxCount: 32Gi
+    post_check:
+      command: "oc get hardwareprofile -n redhat-ods-applications --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 3
+      timeout: "30s"
+      on_fail: STOP
+
+  - id: configure-cluster-settings
+    confidence: inferred
+    description: Set sensible defaults for cluster-wide settings
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: notebook-controller-culler-config
+          namespace: redhat-ods-applications
+        data:
+          ENABLE_CULLING: "true"
+          CULL_IDLE_TIME: "60"
+          IDLENESS_CHECK_PERIOD: "1"
+    post_check:
+      command: "oc get configmap notebook-controller-culler-config -n redhat-ods-applications --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      timeout: "30s"
+      on_fail: STOP
+    return: |
+      ✓ Full ODH stack configured and ready.
+
+      Project: {{ dev_project }}
+
+      ══════════════════════════════════════════════════════
+      DASHBOARD PAGES AND THEIR STATUS:
+      ══════════════════════════════════════════════════════
+
+      ✓ Home                    — Ready
+      ✓ Projects                — Project '{{ dev_project }}' created
+      ✓ Workbenches             — Create workbenches in {{ dev_project }}
+      ✓ Pipelines               — Pipeline server running in {{ dev_project }}
+      ✓ Model Serving (KServe)  — Ready to deploy models
+      ✓ Model Registry          — Enable: odh run model-registry/enable-registry
+      ✓ Hardware Profiles       — Small/Medium/Large profiles created
+      ✓ Cluster Settings        — Culler: 60 min idle timeout
+      ✓ Storage Classes         — Using cluster defaults
+      ✓ Connections             — odh-dev-s3 connection in {{ dev_project }}
+
+      PAGES NEEDING ADDITIONAL SETUP:
+      ⚠ EvalHub         — odh run evalhub/create-evaluation-run
+      ⚠ GenAI Playground — Deploy a vLLM model first
+      ⚠ MLflow           — odh run mlflow/enable-mlflow
+      ⚠ Distributed WL   — odh run distributed-workloads/submit-ray-job
+      ⚠ TrustyAI        — odh run trustyai/enable-trustyai-service
+      ⚠ AutoML/AutoRAG   — Needs pipeline definitions uploaded
+      ⚠ Feature Store    — odh run cluster/enable-feature-store
+      ⚠ GPU Workloads    — odh run gpu/install-gpu-operator (if GPU nodes exist)
+
+      ══════════════════════════════════════════════════════
+      QUICK START — next commands to run:
+      ══════════════════════════════════════════════════════
+
+      # Create a workbench:
+      odh run workbenches/create-workbench-with-connection \
+        -p project_namespace={{ dev_project }} \
+        -p workbench_name=my-workbench \
+        -p s3_connection_name=odh-dev-s3
+
+      # Enable Model Registry:
+      odh run model-registry/enable-registry
+
+      # Deploy a test model:
+      odh run model-serving/deploy-kserve-model \
+        -p project_namespace={{ dev_project }} \
+        -p model_name=test-model \
+        -p model_format=sklearn \
+        -p model_uri=s3://{{ s3_bucket }}/models/test
+
+known_bad_patterns:
+  - "never run this runbook on a cluster with existing ODH resources — it may conflict"
+  - "never skip the wait-components-ready step — enabling all components at once can cause race conditions"
+
+rollback_order:
+  - "oc delete dspa pipelines-definition -n {{ dev_project }}"
+  - "oc delete secret odh-dev-s3 -n {{ dev_project }}"
+  - "oc delete namespace {{ dev_project }}"
+  - "oc delete hardwareprofile small medium large -n redhat-ods-applications"
+
+tags: ["setup","beginner"]
+estimated_minutes: 15
+next_steps:
+  - "Create workbench: odh wizard workbenches/create-workbench"
+  - "Enable MLflow: odh wizard mlflow/enable-mlflow"
+  - "Deploy a model: odh wizard model-serving/deploy-kserve-model"

@@ -1,0 +1,139 @@
+name: mlflow-manage-prompts
+description: >
+  Create, version, and use prompts in MLflow Prompt Registry.
+  Prompt Registry is an MLflow 2.x feature for versioning LLM prompts alongside models.
+  Prompts support templates with {{variable}} substitution, aliases (production/staging),
+  and linking to experiment runs for reproducibility.
+rhoai_version_tested: null
+confidence_overall: doc-derived
+
+parameters:
+  - name: mlflow_tracking_uri
+    description: MLflow server URL
+    required: true
+  - name: prompt_name
+    description: Name for the prompt (e.g. rag-system-prompt)
+    required: true
+  - name: experiment_name
+    description: Experiment to link prompt to (optional)
+    required: false
+    default: prompt-experiments
+
+steps:
+  - id: create-prompt
+    confidence: doc-derived
+    description: Create a new prompt in the MLflow Prompt Registry
+    action:
+      type: api_call
+      method: POST
+      url: "{{ mlflow_tracking_uri }}/api/2.0/mlflow/prompts/create-prompt"
+      headers:
+        Content-Type: "application/json"
+      body: |
+        {
+          "name": "{{ prompt_name }}",
+          "template": "You are a helpful AI assistant specialized in data science.\n\nContext: {{context}}\n\nUser question: {{question}}\n\nAnswer concisely and accurately based on the context provided.",
+          "commit_message": "Initial prompt version",
+          "tags": [
+            {"key": "type", "value": "system-prompt"},
+            {"key": "created_by", "value": "odh-assistant"}
+          ]
+        }
+      store_response_as: created_prompt
+    post_check:
+      assert: created_prompt is not empty
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: set-production-alias
+    confidence: doc-derived
+    description: Set 'production' alias pointing to the first prompt version
+    action:
+      type: api_call
+      method: POST
+      url: "{{ mlflow_tracking_uri }}/api/2.0/mlflow/prompts/set-prompt-alias"
+      headers:
+        Content-Type: "application/json"
+      body: |
+        {
+          "name": "{{ prompt_name }}",
+          "alias": "production",
+          "version": "1"
+        }
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: create-v2-prompt
+    confidence: doc-derived
+    description: Create a second version (improved prompt)
+    action:
+      type: api_call
+      method: POST
+      url: "{{ mlflow_tracking_uri }}/api/2.0/mlflow/prompts/update-prompt"
+      headers:
+        Content-Type: "application/json"
+      body: |
+        {
+          "name": "{{ prompt_name }}",
+          "template": "You are an expert data science assistant with deep knowledge of MLOps and ODH/RHOAI.\n\nContext information:\n{{context}}\n\nQuestion: {{question}}\n\nProvide a precise, actionable answer. If you don't know, say so.",
+          "commit_message": "Improved with MLOps expertise and clearer instructions",
+          "tags": [
+            {"key": "improved", "value": "true"},
+            {"key": "tested_on", "value": "gpt4-evaluation-set"}
+          ]
+        }
+      store_response_as: v2_prompt
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+    return: |
+      ✓ Prompts created in MLflow Prompt Registry.
+
+      Prompt name: {{ prompt_name }}
+      Versions: 1 (production alias), 2 (latest)
+
+      MLflow UI: {{ mlflow_tracking_uri }}/#/prompts/{{ prompt_name }}
+
+      ────────────────────────────────────────────────────────
+      Use this prompt in your code:
+        import mlflow
+        mlflow.set_tracking_uri("{{ mlflow_tracking_uri }}")
+        client = mlflow.tracking.MlflowClient()
+
+        # Load by alias (production):
+        prompt = client.load_prompt("prompts:/{{ prompt_name }}@production")
+
+        # Load latest version:
+        prompt = client.load_prompt("prompts:/{{ prompt_name }}/2")
+
+        # Render with variables:
+        rendered = prompt.format(
+            context="ODH is an AI/ML platform on OpenShift",
+            question="How do I deploy a model?"
+        )
+        print(rendered)
+
+      Link prompt to a run:
+        with mlflow.start_run():
+            client.link_prompt_version_to_run(
+                run_id=mlflow.active_run().info.run_id,
+                prompt_name="{{ prompt_name }}",
+                prompt_version="1"
+            )
+      ────────────────────────────────────────────────────────
+
+known_bad_patterns:
+  - "never hardcode prompt text in application code — always load from registry to enable versioning"
+  - "never put API keys or secrets in prompt templates — use environment variables instead"
+  - "never delete a prompt version that is linked to production runs — archive it first"
+  - "always link prompts to runs so you know which prompt version produced which result"
+
+rollback_order:
+  - "POST {{ mlflow_tracking_uri }}/api/2.0/mlflow/prompts/delete-prompt-alias with name={{ prompt_name }}&alias=production"

@@ -1,0 +1,115 @@
+name: projects-create-s3-connection
+description: >
+  Create an S3-compatible data connection (Secret) in a project.
+  Matches EXACTLY what the ODH dashboard creates:
+  - Labels: opendatahub.io/dashboard=true AND opendatahub.io/managed=true (both required)
+  - Annotation: opendatahub.io/connection-type: "s3"
+  - Data keys: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_S3_ENDPOINT, AWS_DEFAULT_REGION, AWS_S3_BUCKET
+  Dashboard renders connections by listing secrets with these two labels in the project namespace.
+rhoai_version_tested: null
+confidence_overall: doc-derived
+
+parameters:
+  - name: project_namespace
+    description: Project namespace to create the connection in
+    required: true
+  - name: connection_name
+    description: Name for the connection shown in dashboard (used as resource name too)
+    required: true
+  - name: aws_access_key_id
+    description: S3 access key ID
+    required: true
+  - name: aws_secret_access_key
+    description: S3 secret access key
+    required: true
+  - name: s3_endpoint
+    description: S3 endpoint URL (e.g. https://s3.amazonaws.com or MinIO URL)
+    required: true
+  - name: s3_bucket
+    description: S3 bucket name
+    required: true
+  - name: s3_region
+    description: S3 region (e.g. us-east-1)
+    required: false
+    default: us-east-1
+
+steps:
+  - id: check-namespace-exists
+    confidence: doc-derived
+    description: Verify project namespace exists
+    requires:
+      - type: namespace
+        name: "{{ project_namespace }}"
+    pre_check:
+      command: "oc get namespace {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      on_fail: STOP
+    action:
+      type: none
+    post_check:
+      command: "oc get namespace {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: create-connection-secret
+    confidence: doc-derived
+    description: >
+      Create S3 connection secret matching the EXACT format the dashboard creates and renders.
+      Dashboard filters by BOTH labels: opendatahub.io/dashboard=true AND opendatahub.io/managed=true.
+      Connection type annotation must be exactly: opendatahub.io/connection-type: "s3"
+      Data keys must be the AWS env var names — these are what DSPA s3CredentialsSecret references.
+    pre_check:
+      command: "oc get secret {{ connection_name }} -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: {{ connection_name }}
+          namespace: {{ project_namespace }}
+          labels:
+            opendatahub.io/dashboard: "true"
+            opendatahub.io/managed: "true"
+          annotations:
+            openshift.io/display-name: "{{ connection_name }}"
+            opendatahub.io/connection-type: "s3"
+        type: Opaque
+        stringData:
+          AWS_ACCESS_KEY_ID: "{{ aws_access_key_id }}"
+          AWS_SECRET_ACCESS_KEY: "{{ aws_secret_access_key }}"
+          AWS_S3_ENDPOINT: "{{ s3_endpoint }}"
+          AWS_DEFAULT_REGION: "{{ s3_region }}"
+          AWS_S3_BUCKET: "{{ s3_bucket }}"
+    post_check:
+      command: "oc get secret {{ connection_name }} -n {{ project_namespace }} -o jsonpath='{.metadata.labels.opendatahub\\.io/managed}'"
+      expected: "true"
+      timeout: "30s"
+      on_fail: STOP
+    rollback: "oc delete secret {{ connection_name }} -n {{ project_namespace }}"
+    return: |
+      ✓ S3 connection created: {{ connection_name }}
+
+      Project:  {{ project_namespace }}
+      Bucket:   {{ s3_bucket }}
+      Endpoint: {{ s3_endpoint }}
+
+      Dashboard: Projects → {{ project_namespace }} → Connections → {{ connection_name }}
+
+      This connection can be used for:
+        - Workbench data access (env var injection)
+        - Pipeline server artifact storage (s3CredentialsSecret references AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY by key name)
+        - Model deployment storage (storage.key field)
+
+known_bad_patterns:
+  - "CRITICAL: the dashboard requires BOTH opendatahub.io/dashboard=true AND opendatahub.io/managed=true — missing either label means the connection won't appear"
+  - "never use a different data key naming — DSPA references AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY by exact key name in its spec"
+  - "never store AWS credentials in a ConfigMap — always use Secret"
+
+rollback_order:
+  - "oc delete secret {{ connection_name }} -n {{ project_namespace }}"

@@ -1,0 +1,224 @@
+name: workbenches-create-workbench-gpu
+description: >
+  Create a Jupyter workbench with GPU access in a Data Science Project.
+  Requires GPU nodes to be available in the cluster (run gpu/verify-gpu-available first).
+  Uses nvidia.com/gpu resource requests and a CUDA-enabled notebook image.
+rhoai_version_tested: null
+confidence_overall: inferred
+
+parameters:
+  - name: project_namespace
+    description: Project namespace
+    required: true
+  - name: workbench_name
+    description: Name for the workbench
+    required: true
+  - name: notebook_image
+    description: CUDA-enabled notebook image
+    required: false
+    default: "quay.io/opendatahub/workbench-images:jupyter-pytorch-ubi9-python-3.11-2024.2"
+  - name: gpu_count
+    description: Number of GPUs to request
+    required: false
+    default: "1"
+  - name: pvc_size
+    description: Storage size
+    required: false
+    default: "50Gi"
+  - name: memory_request
+    description: Memory request (GPU workloads need more memory)
+    required: false
+    default: "16Gi"
+  - name: cpu_request
+    description: CPU request
+    required: false
+    default: "4"
+
+steps:
+  - id: verify-gpu-available
+    confidence: inferred
+    description: Check at least one GPU node is allocatable in cluster
+    requires:
+      - type: namespace
+        name: "{{ project_namespace }}"
+      - type: storage-class
+      - type: gpu-available
+        can_auto_resolve: false
+        blocker_message: "GPU nodes required. Run: odh run gpu/add-gpu-node-ocm"
+      - type: gpu-operator-installed
+    pre_check:
+      command: "oc get nodes -o jsonpath='{.items[*].status.allocatable.nvidia\\.com/gpu}' | tr ' ' '\\n' | grep -v '^0$' | grep -v '^$' | wc -l | tr -d ' '"
+      expected_min: 1
+      on_fail: STOP
+    action:
+      type: none
+    post_check:
+      command: "oc get nodes -o jsonpath='{.items[*].status.allocatable.nvidia\\.com/gpu}' | tr ' ' '\\n' | grep -v '^0$' | grep -v '^$' | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "15s"
+      on_fail: STOP
+
+  - id: create-gpu-workbench-pvc
+    confidence: inferred
+    description: Create PVC for GPU workbench
+    pre_check:
+      command: "oc get pvc {{ workbench_name }} -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: v1
+        kind: PersistentVolumeClaim
+        metadata:
+          name: {{ workbench_name }}
+          namespace: {{ project_namespace }}
+          labels:
+            opendatahub.io/dashboard: "true"
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: {{ pvc_size }}
+    post_check:
+      command: "oc get pvc {{ workbench_name }} -n {{ project_namespace }} -o jsonpath='{.status.phase}'"
+      expected: "Bound"
+      timeout: "120s"
+      poll_interval: "10s"
+      on_fail: STOP
+    rollback: "oc delete pvc {{ workbench_name }} -n {{ project_namespace }}"
+
+  - id: create-gpu-notebook
+    confidence: inferred
+    description: >
+      Create Notebook CR with GPU resource request.
+      CRITICAL FIXES vs non-GPU workbench:
+      - inject-auth (NOT inject-oauth)
+      - NOTEBOOK_ARGS includes --ServerApp.base_url
+      - odh-managed: true label required
+      - shm volume required (always injected by dashboard)
+      - probes pointing to /notebook/{ns}/{name}/api
+    pre_check:
+      command: "oc get notebook {{ workbench_name }} -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: kubeflow.org/v1
+        kind: Notebook
+        metadata:
+          name: {{ workbench_name }}
+          namespace: {{ project_namespace }}
+          labels:
+            app: {{ workbench_name }}
+            opendatahub.io/dashboard: "true"
+            opendatahub.io/odh-managed: "true"
+          annotations:
+            openshift.io/display-name: "{{ workbench_name }}"
+            openshift.io/description: ""
+            notebooks.opendatahub.io/inject-auth: "true"
+            notebooks.opendatahub.io/last-image-selection: "{{ notebook_image }}"
+            notebooks.opendatahub.io/last-size-selection: "Large"
+        spec:
+          template:
+            spec:
+              enableServiceLinks: false
+              containers:
+                - name: {{ workbench_name }}
+                  image: {{ notebook_image }}
+                  imagePullPolicy: Always
+                  workingDir: /opt/app-root/src
+                  ports:
+                    - name: notebook-port
+                      containerPort: 8888
+                      protocol: TCP
+                  resources:
+                    requests:
+                      cpu: "{{ cpu_request }}"
+                      memory: "{{ memory_request }}"
+                      nvidia.com/gpu: "{{ gpu_count }}"
+                    limits:
+                      cpu: "{{ cpu_request }}"
+                      memory: "{{ memory_request }}"
+                      nvidia.com/gpu: "{{ gpu_count }}"
+                  env:
+                    - name: NOTEBOOK_ARGS
+                      value: >-
+                        --ServerApp.port=8888
+                        --ServerApp.token=''
+                        --ServerApp.password=''
+                        --ServerApp.base_url=/notebook/{{ project_namespace }}/{{ workbench_name }}
+                        --ServerApp.quit_button=False
+                    - name: JUPYTER_IMAGE
+                      value: "{{ notebook_image }}"
+                    - name: NVIDIA_VISIBLE_DEVICES
+                      value: "all"
+                    - name: NVIDIA_DRIVER_CAPABILITIES
+                      value: "compute,utility"
+                  livenessProbe:
+                    httpGet:
+                      path: /notebook/{{ project_namespace }}/{{ workbench_name }}/api
+                      port: notebook-port
+                      scheme: HTTP
+                    initialDelaySeconds: 10
+                    periodSeconds: 5
+                    timeoutSeconds: 1
+                    successThreshold: 1
+                    failureThreshold: 3
+                  readinessProbe:
+                    httpGet:
+                      path: /notebook/{{ project_namespace }}/{{ workbench_name }}/api
+                      port: notebook-port
+                      scheme: HTTP
+                    initialDelaySeconds: 10
+                    periodSeconds: 5
+                    timeoutSeconds: 1
+                    successThreshold: 1
+                    failureThreshold: 3
+                  volumeMounts:
+                    - name: {{ workbench_name }}
+                      mountPath: /opt/app-root/src
+                    - name: shm
+                      mountPath: /dev/shm
+              tolerations:
+                - key: nvidia.com/gpu
+                  operator: Exists
+                  effect: NoSchedule
+              volumes:
+                - name: {{ workbench_name }}
+                  persistentVolumeClaim:
+                    claimName: {{ workbench_name }}
+                - name: shm
+                  emptyDir:
+                    medium: Memory
+    post_check:
+      command: "oc get notebook {{ workbench_name }} -n {{ project_namespace }} -o jsonpath='{.status.conditions[?(@.type==\"Running\")].status}'"
+      expected: "True"
+      timeout: "600s"
+      poll_interval: "20s"
+      on_fail: STOP
+    rollback: "oc delete notebook {{ workbench_name }} -n {{ project_namespace }}"
+    return: |
+      ✓ GPU workbench created: {{ workbench_name }}
+
+      GPUs: {{ gpu_count }}x nvidia.com/gpu
+      Image: {{ notebook_image }}
+      Memory: {{ memory_request }}
+
+      Dashboard: Projects → {{ project_namespace }} → Workbenches → {{ workbench_name }} → Open
+
+known_bad_patterns:
+  - "never request GPUs without the nvidia.com/gpu toleration — the pod will be pending forever"
+  - "never use a non-CUDA image with GPU requests — the GPU will be allocated but unusable"
+  - "never request more GPUs than exist on a single node — the pod cannot be scheduled"
+  - "never skip verify-gpu-available — if GPU operator is not installed the request silently fails"
+
+rollback_order:
+  - "oc delete notebook {{ workbench_name }} -n {{ project_namespace }}"
+  - "oc delete pvc {{ workbench_name }} -n {{ project_namespace }}"

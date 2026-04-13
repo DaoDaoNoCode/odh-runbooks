@@ -1,0 +1,205 @@
+name: model-training-submit-pytorch-job
+description: >
+  Submit a distributed PyTorch training job using the Kubeflow Training Operator.
+  Uses PyTorchJob CRD (kubeflow.org/v1) with Master + Worker replica types.
+  CRITICAL: Always disable Istio sidecar injection (sidecar.istio.io/inject: "false").
+  Supports single-node, multi-node, and elastic (TorchElastic) training modes.
+rhoai_version_tested: null
+confidence_overall: doc-derived
+
+parameters:
+  - name: project_namespace
+    description: Project namespace
+    required: true
+  - name: job_name
+    description: Name for the PyTorchJob
+    required: true
+  - name: training_image
+    description: Docker image with your training code
+    required: true
+  - name: training_script
+    description: Python script path in the container (e.g. /workspace/train.py)
+    required: true
+  - name: num_workers
+    description: Number of worker nodes for distributed training
+    required: false
+    default: "2"
+  - name: gpu_per_worker
+    description: GPUs per worker (0 for CPU-only)
+    required: false
+    default: "1"
+  - name: cpu_per_worker
+    description: CPUs per worker
+    required: false
+    default: "4"
+  - name: memory_per_worker
+    description: Memory per worker
+    required: false
+    default: "16Gi"
+  - name: elastic_min_replicas
+    description: Minimum replicas for elastic training (0 = non-elastic)
+    required: false
+    default: "0"
+
+steps:
+  - id: check-training-operator
+    confidence: doc-derived
+    description: Verify PyTorchJob CRD is installed (Training Operator must be enabled)
+    requires:
+      - type: training-operator-enabled
+      - type: namespace
+        name: "{{ project_namespace }}"
+      - type: gpu-available
+        can_auto_resolve: false
+        blocker_message: "GPU nodes required for distributed PyTorch training. Run: odh run gpu/add-gpu-node-ocm"
+    pre_check:
+      command: "oc get crd pytorchjobs.kubeflow.org --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      on_fail: STOP
+    action:
+      type: none
+    post_check:
+      command: "oc get crd pytorchjobs.kubeflow.org --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: submit-pytorch-job
+    confidence: doc-derived
+    description: Create PyTorchJob with Master + Worker configuration
+    pre_check:
+      command: "oc get pytorchjob {{ job_name }} -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: kubeflow.org/v1
+        kind: PyTorchJob
+        metadata:
+          name: {{ job_name }}
+          namespace: {{ project_namespace }}
+          labels:
+            opendatahub.io/dashboard: "true"
+        spec:
+          pytorchReplicaSpecs:
+            Master:
+              replicas: 1
+              restartPolicy: OnFailure
+              template:
+                metadata:
+                  annotations:
+                    sidecar.istio.io/inject: "false"
+                spec:
+                  containers:
+                    - name: pytorch
+                      image: {{ training_image }}
+                      command:
+                        - torchrun
+                        - --nproc_per_node={{ gpu_per_worker }}
+                        - "{{ training_script }}"
+                      resources:
+                        requests:
+                          cpu: "{{ cpu_per_worker }}"
+                          memory: "{{ memory_per_worker }}"
+                        limits:
+                          cpu: "{{ cpu_per_worker }}"
+                          memory: "{{ memory_per_worker }}"
+                          nvidia.com/gpu: "{{ gpu_per_worker }}"
+                      env:
+                        - name: PYTHONUNBUFFERED
+                          value: "1"
+                      imagePullPolicy: Always
+            Worker:
+              replicas: {{ num_workers }}
+              restartPolicy: OnFailure
+              template:
+                metadata:
+                  annotations:
+                    sidecar.istio.io/inject: "false"
+                spec:
+                  containers:
+                    - name: pytorch
+                      image: {{ training_image }}
+                      command:
+                        - torchrun
+                        - --nproc_per_node={{ gpu_per_worker }}
+                        - "{{ training_script }}"
+                      resources:
+                        requests:
+                          cpu: "{{ cpu_per_worker }}"
+                          memory: "{{ memory_per_worker }}"
+                        limits:
+                          cpu: "{{ cpu_per_worker }}"
+                          memory: "{{ memory_per_worker }}"
+                          nvidia.com/gpu: "{{ gpu_per_worker }}"
+                      env:
+                        - name: PYTHONUNBUFFERED
+                          value: "1"
+                      imagePullPolicy: Always
+    post_check:
+      command: "oc get pytorchjob {{ job_name }} -n {{ project_namespace }} -o jsonpath='{.status.conditions[-1].type}' 2>/dev/null"
+      expected: "Created"
+      timeout: "60s"
+      poll_interval: "5s"
+      on_fail: STOP
+    rollback: "oc delete pytorchjob {{ job_name }} -n {{ project_namespace }}"
+
+  - id: wait-job-running
+    confidence: doc-derived
+    description: Wait for training job to reach Running state
+    action:
+      type: wait
+      command: "oc wait pytorchjob {{ job_name }} -n {{ project_namespace }} --for=condition=Running --timeout=300s"
+    post_check:
+      command: "oc get pytorchjob {{ job_name }} -n {{ project_namespace }} -o jsonpath='{.status.replicaStatuses.Master.active}' 2>/dev/null"
+      expected_min: 1
+      timeout: "300s"
+      poll_interval: "15s"
+      on_fail: STOP
+    return: |
+      ✓ PyTorchJob submitted and running.
+
+      Job:        {{ job_name }}
+      Workers:    {{ num_workers }} × {{ gpu_per_worker }} GPU
+      Image:      {{ training_image }}
+      Script:     {{ training_script }}
+
+      Monitor:
+        oc get pytorchjob {{ job_name }} -n {{ project_namespace }}
+        oc logs -n {{ project_namespace }} -l job-name={{ job_name }},replica-type=master -f
+        oc logs -n {{ project_namespace }} -l job-name={{ job_name }},replica-type=worker -f
+
+      Wait for completion:
+        oc wait pytorchjob {{ job_name }} -n {{ project_namespace }} \
+          --for=condition=Succeeded --timeout=3600s
+
+      ─────────────────────────────────────────────────────
+      In your training script, use standard PyTorch DDP:
+        import torch.distributed as dist
+        dist.init_process_group(backend="nccl")  # GPU
+        # OR
+        dist.init_process_group(backend="gloo")  # CPU
+
+      TorchRun sets these env vars automatically:
+        MASTER_ADDR, MASTER_PORT, WORLD_SIZE, RANK, LOCAL_RANK
+
+      For MLflow logging inside training:
+        import mlflow, os
+        mlflow.set_tracking_uri(os.environ.get("MLFLOW_TRACKING_URI", ""))
+        if int(os.environ.get("RANK", "0")) == 0:  # Only log from rank 0
+            with mlflow.start_run():
+                mlflow.log_metric("loss", loss.item(), step=step)
+      ─────────────────────────────────────────────────────
+
+known_bad_patterns:
+  - "CRITICAL: never omit sidecar.istio.io/inject: false — Istio will intercept nccl traffic and break distributed training"
+  - "never use nproc_per_node higher than gpu_per_worker — extra processes will fail to acquire GPUs"
+  - "never log metrics from all workers — only rank 0 should write to MLflow/model registry"
+  - "never use backend=nccl without GPU — it will fail; use gloo for CPU training"
+  - "never set restartPolicy: Never for long training jobs — OnFailure allows recovery from transient failures"
+
+rollback_order:
+  - "oc delete pytorchjob {{ job_name }} -n {{ project_namespace }}"

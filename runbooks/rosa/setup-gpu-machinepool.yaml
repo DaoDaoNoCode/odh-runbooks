@@ -1,0 +1,400 @@
+name: rosa-setup-gpu-machinepool
+description: >
+  Complete GPU setup on ROSA: create GPU machinepool, install NFD + NVIDIA GPU Operator,
+  and create an AcceleratorProfile in RHOAI for workbench GPU selection.
+
+  IMPORTANT: AcceleratorProfile (not HardwareProfile) is the correct resource for GPU
+  in RHOAI workbenches. HardwareProfile is for general compute tiers.
+
+  Source: devtools/RHOAI-on-ROSA/install-rhoai/install-workbench-with-gpu/README-rhoai-workbench-gpu.md
+
+  Instance type guidance:
+    g4dn.2xlarge  — 1x NVIDIA T4 (16GB VRAM) — good for small LLMs, dev/test
+    g4dn.12xlarge — 4x NVIDIA T4 (64GB VRAM) — medium workloads
+    g5.2xlarge    — 1x NVIDIA A10G (24GB VRAM) — recommended for Llama 3 8B
+    g5.12xlarge   — 4x NVIDIA A10G (96GB VRAM) — large models
+    p3.2xlarge    — 1x NVIDIA V100 (16GB VRAM) — older but available
+
+  Costs proportional to instance type — check AWS EC2 pricing before selecting.
+rhoai_version_tested: null
+confidence_overall: doc-derived
+
+parameters:
+  - name: cluster_name
+    description: ROSA cluster name (from: rosa list clusters)
+    required: true
+  - name: machinepool_name
+    description: Name for the GPU machinepool
+    required: false
+    default: gpu-nodes
+  - name: instance_type
+    description: "AWS GPU instance type (e.g. g4dn.2xlarge, g5.2xlarge)"
+    required: false
+    default: g4dn.2xlarge
+  - name: min_replicas
+    description: Minimum GPU nodes (autoscaling)
+    required: false
+    default: "1"
+  - name: max_replicas
+    description: Maximum GPU nodes (autoscaling). Increase if deploying more than 2 nodes.
+    required: false
+    default: "2"
+  - name: accelerator_profile_name
+    description: Name for the AcceleratorProfile in RHOAI
+    required: false
+    default: nvidia-gpu
+  - name: gpu_operator_channel
+    description: NVIDIA GPU Operator OLM channel
+    required: false
+    default: v24.9
+
+steps:
+  - id: check-ocm-cli
+    confidence: doc-derived
+    description: Verify rosa CLI is available and authenticated
+    requires:
+      - type: openshift-cluster
+    pre_check:
+      command: "rosa whoami 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      on_fail: STOP
+    action:
+      type: none
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: check-existing-gpu-machinepool
+    confidence: doc-derived
+    description: Check if a GPU machinepool already exists
+    pre_check:
+      command: "rosa list machinepools --cluster {{ cluster_name }} 2>/dev/null | grep -c '{{ machinepool_name }}' || echo 0"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: none
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "5s"
+      on_fail: STOP
+
+  - id: create-gpu-machinepool
+    confidence: doc-derived
+    description: >
+      Create GPU machinepool with autoscaling.
+      NOTE: Pods will stay Pending until AWS provisions the nodes (can take 5-15 min).
+      Autoscaler provisions new nodes when workloads require GPU resources.
+    action:
+      type: query
+      command: |
+        rosa create machinepool \
+          --cluster={{ cluster_name }} \
+          --name={{ machinepool_name }} \
+          --enable-autoscaling \
+          --min-replicas {{ min_replicas }} \
+          --max-replicas {{ max_replicas }} \
+          --instance-type={{ instance_type }}
+        echo "machinepool created"
+      store_as: machinepool_result
+    post_check:
+      command: "rosa list machinepools --cluster {{ cluster_name }} 2>/dev/null | grep -c '{{ machinepool_name }}' || echo 0"
+      expected_min: 1
+      timeout: "60s"
+      on_fail: STOP
+    rollback: "rosa delete machinepool --cluster {{ cluster_name }} {{ machinepool_name }} 2>/dev/null || true"
+
+  - id: wait-gpu-nodes-join
+    confidence: doc-derived
+    description: >
+      Wait for GPU nodes to join the cluster and become Ready.
+      This can take 10-15 minutes as AWS provisions the EC2 instances.
+    action:
+      type: wait
+      command: "oc wait nodes -l node-role.kubernetes.io/worker= --for=condition=Ready --timeout=900s 2>/dev/null || sleep 30"
+    post_check:
+      command: "oc get nodes --no-headers 2>/dev/null | grep -v master | grep -c Ready || echo 0"
+      expected_min: 1
+      timeout: "900s"
+      poll_interval: "30s"
+      on_fail: STOP
+
+  - id: install-nfd-operator
+    confidence: doc-derived
+    description: >
+      Install Node Feature Discovery (NFD) operator.
+      NFD inspects hardware on each node and labels them with detected features,
+      including GPU resources. Required BEFORE GPU Operator.
+    pre_check:
+      command: "oc get subscription nfd -n openshift-nfd --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: openshift-nfd
+        ---
+        apiVersion: operators.coreos.com/v1
+        kind: OperatorGroup
+        metadata:
+          name: nfd-operatorgroup
+          namespace: openshift-nfd
+        spec:
+          targetNamespaces:
+            - openshift-nfd
+        ---
+        apiVersion: operators.coreos.com/v1alpha1
+        kind: Subscription
+        metadata:
+          name: nfd
+          namespace: openshift-nfd
+        spec:
+          channel: stable
+          installPlanApproval: Automatic
+          name: nfd
+          source: redhat-operators
+          sourceNamespace: openshift-marketplace
+    post_check:
+      command: "oc get csv -n openshift-nfd --no-headers 2>/dev/null | grep -c Succeeded || echo 0"
+      expected_min: 1
+      timeout: "300s"
+      poll_interval: "15s"
+      on_fail: STOP
+
+  - id: create-nfd-instance
+    confidence: doc-derived
+    description: Create NodeFeatureDiscovery CR to start detecting hardware features
+    pre_check:
+      command: "oc get nodefeaturediscovery -n openshift-nfd --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: nfd.openshift.io/v1
+        kind: NodeFeatureDiscovery
+        metadata:
+          name: nfd-instance
+          namespace: openshift-nfd
+        spec:
+          operand:
+            servicePort: 12000
+          workerConfig:
+            configData: |
+              core:
+                sleepInterval: 60s
+    post_check:
+      command: "oc get nodefeaturediscovery nfd-instance -n openshift-nfd -o jsonpath='{.status.conditions[?(@.type==\"Available\")].status}' 2>/dev/null"
+      expected: "True"
+      timeout: "300s"
+      poll_interval: "20s"
+      on_fail: STOP
+
+  - id: install-gpu-operator
+    confidence: doc-derived
+    description: >
+      Install NVIDIA GPU Operator via OLM.
+      Installs: kernel drivers, Container Toolkit, Device Plugin (exposes nvidia.com/gpu resource).
+      Use versioned channel (e.g. v24.9) not 'stable'.
+    pre_check:
+      command: "oc get subscription gpu-operator-certified -n nvidia-gpu-operator --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: nvidia-gpu-operator
+          labels:
+            openshift.io/cluster-monitoring: "true"
+        ---
+        apiVersion: operators.coreos.com/v1
+        kind: OperatorGroup
+        metadata:
+          name: nvidia-gpu-operator-group
+          namespace: nvidia-gpu-operator
+        spec:
+          targetNamespaces:
+            - nvidia-gpu-operator
+        ---
+        apiVersion: operators.coreos.com/v1alpha1
+        kind: Subscription
+        metadata:
+          name: gpu-operator-certified
+          namespace: nvidia-gpu-operator
+        spec:
+          channel: "{{ gpu_operator_channel }}"
+          installPlanApproval: Automatic
+          name: gpu-operator-certified
+          source: certified-operators
+          sourceNamespace: openshift-marketplace
+    post_check:
+      command: "oc get csv -n nvidia-gpu-operator --no-headers 2>/dev/null | grep -c Succeeded || echo 0"
+      expected_min: 1
+      timeout: "600s"
+      poll_interval: "20s"
+      on_fail: STOP
+
+  - id: create-cluster-policy
+    confidence: doc-derived
+    description: >
+      Create ClusterPolicy to deploy GPU drivers and device plugin on GPU nodes.
+      After this, GPU nodes will expose nvidia.com/gpu resource.
+      Wait 5-10 minutes for drivers to compile and apply.
+    pre_check:
+      command: "oc get clusterpolicy gpu-cluster-policy -n nvidia-gpu-operator --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: nvidia.com/v1
+        kind: ClusterPolicy
+        metadata:
+          name: gpu-cluster-policy
+          namespace: nvidia-gpu-operator
+        spec:
+          operator:
+            defaultRuntime: crio
+          driver:
+            enabled: true
+          toolkit:
+            enabled: true
+          devicePlugin:
+            enabled: true
+          dcgm:
+            enabled: true
+          dcgmExporter:
+            enabled: true
+          gfd:
+            enabled: true
+          migManager:
+            enabled: false
+          nodeStatusExporter:
+            enabled: true
+          validator:
+            plugin:
+              env:
+                - name: WITH_WORKLOAD
+                  value: "true"
+    post_check:
+      command: "oc get clusterpolicy gpu-cluster-policy -n nvidia-gpu-operator -o jsonpath='{.status.state}' 2>/dev/null"
+      expected: "ready"
+      timeout: "900s"
+      poll_interval: "30s"
+      on_fail: STOP
+
+  - id: verify-gpu-allocatable
+    confidence: doc-derived
+    description: Verify GPU nodes show nvidia.com/gpu as allocatable resource
+    action:
+      type: query
+      command: |
+        oc get nodes -o custom-columns='NAME:.metadata.name,GPU:.status.allocatable.nvidia\.com/gpu' \
+          --no-headers 2>/dev/null | grep -v '<none>'
+      store_as: gpu_node_list
+    post_check:
+      command: "oc get nodes -o jsonpath='{.items[*].status.allocatable.nvidia\\.com/gpu}' 2>/dev/null | tr ' ' '\\n' | grep -v '^0$' | grep -v '^$' | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "60s"
+      on_fail: STOP
+
+  - id: create-accelerator-profile
+    confidence: doc-derived
+    description: >
+      Create AcceleratorProfile in RHOAI so users can select GPUs in workbenches.
+      NOTE: This is AcceleratorProfile (not HardwareProfile) for GPU/accelerator resources.
+      Users see this in: RHOAI Dashboard → Create Workbench → Accelerator dropdown.
+      Verification: oc get acceleratorprofiles -n redhat-ods-applications
+    pre_check:
+      command: "oc get acceleratorprofile {{ accelerator_profile_name }} -n redhat-ods-applications --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: dashboard.opendatahub.io/v1
+        kind: AcceleratorProfile
+        metadata:
+          name: {{ accelerator_profile_name }}
+          namespace: redhat-ods-applications
+          annotations:
+            opendatahub.io/display-name: "NVIDIA GPU"
+            opendatahub.io/description: "NVIDIA GPU node ({{ instance_type }})"
+            opendatahub.io/disabled: "false"
+        spec:
+          identifier: nvidia.com/gpu
+          displayName: "NVIDIA GPU"
+          enabled: true
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Exists
+              effect: NoSchedule
+    post_check:
+      command: "oc get acceleratorprofile {{ accelerator_profile_name }} -n redhat-ods-applications --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "30s"
+      on_fail: STOP
+    rollback: "oc delete acceleratorprofile {{ accelerator_profile_name }} -n redhat-ods-applications 2>/dev/null || true"
+    return: |
+      ✓ GPU setup complete.
+
+      Machinepool: {{ machinepool_name }} ({{ instance_type }})
+      GPU nodes:
+      {{ gpu_node_list }}
+
+      AcceleratorProfile: {{ accelerator_profile_name }} (nvidia.com/gpu)
+
+      Users can now:
+        RHOAI Dashboard → Data Science Projects → <project> → Workbenches → Create workbench
+        → Select GPU image (PyTorch/TensorFlow with CUDA)
+        → Deployment size → Accelerator → NVIDIA GPU → Count: 1
+
+      Verify from within a workbench notebook:
+        import torch
+        print(f"CUDA available: {torch.cuda.is_available()}")
+        print(f"GPUs: {torch.cuda.device_count()}")
+
+      Troubleshooting:
+        oc describe node <gpu-node> | grep nvidia.com/gpu
+        oc get pods -n nvidia-gpu-operator
+        oc get acceleratorprofiles -n redhat-ods-applications
+
+known_bad_patterns:
+  - "CRITICAL: AcceleratorProfile is the correct resource for GPU in RHOAI workbenches — not HardwareProfile"
+  - "never use 'stable' channel for NVIDIA GPU Operator on OpenShift — use a versioned channel (v24.x)"
+  - "never skip NFD before GPU Operator — NFD must label nodes before the GPU Operator can target them"
+  - "never set max-replicas to 1 if you need more than 1 GPU node — autoscaler is bounded by max-replicas"
+  - "pods will remain Pending while AWS provisions new GPU nodes — this is normal, wait 10-15 minutes"
+
+rollback_order:
+  - "oc delete acceleratorprofile {{ accelerator_profile_name }} -n redhat-ods-applications 2>/dev/null || true"
+  - "oc delete clusterpolicy gpu-cluster-policy -n nvidia-gpu-operator 2>/dev/null || true"
+  - "oc delete subscription gpu-operator-certified -n nvidia-gpu-operator 2>/dev/null || true"
+  - "oc delete namespace nvidia-gpu-operator 2>/dev/null || true"
+  - "oc delete nodefeaturediscovery nfd-instance -n openshift-nfd 2>/dev/null || true"
+  - "rosa delete machinepool --cluster {{ cluster_name }} {{ machinepool_name }} 2>/dev/null || true"
+
+tags: ["gpu","rosa","setup"]
+estimated_minutes: 25
+next_steps:
+  - "Create GPU workbench: odh wizard workbenches/create-workbench-gpu"
+  - "Deploy vLLM model: odh wizard model-serving/deploy-vllm-model"

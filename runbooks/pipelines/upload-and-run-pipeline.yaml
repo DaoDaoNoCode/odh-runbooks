@@ -1,0 +1,135 @@
+name: pipelines-upload-and-run-pipeline
+description: >
+  Upload a Kubeflow Pipeline YAML/ZIP and create a pipeline run.
+  Uses the DSP REST API directly (v2beta1).
+  Requires a pipeline server (DSPA) to be already running in the project.
+rhoai_version_tested: null
+confidence_overall: inferred
+
+parameters:
+  - name: project_namespace
+    description: Project namespace with a running pipeline server
+    required: true
+  - name: pipeline_name
+    description: Name for the pipeline
+    required: true
+  - name: pipeline_file
+    description: Local path to the pipeline YAML or ZIP file
+    required: true
+  - name: run_name
+    description: Name for the pipeline run
+    required: false
+    default: "{{ pipeline_name }}-run-1"
+
+steps:
+  - id: check-pipeline-server-ready
+    confidence: inferred
+    description: Verify pipeline server (DSPA) is running in the project
+    requires:
+      - type: dsp-enabled
+      - type: namespace
+        name: "{{ project_namespace }}"
+      - type: pipeline-server
+        namespace: "{{ project_namespace }}"
+    pre_check:
+      command: "oc get dspa -n {{ project_namespace }} --no-headers 2>/dev/null | grep -c 'ComponentsReady\\|Ready' || echo 0"
+      expected_min: 1
+      on_fail: STOP
+    action:
+      type: none
+    post_check:
+      command: "oc get dspa -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: get-pipeline-api-url
+    confidence: inferred
+    description: Get the DSP API server URL
+    action:
+      type: query
+      command: "oc get route ds-pipeline-dspo-{{ project_namespace }} -n {{ project_namespace }} -o jsonpath='{.spec.host}' 2>/dev/null || oc get route -n {{ project_namespace }} -l app=ds-pipeline -o jsonpath='{.items[0].spec.host}' 2>/dev/null"
+      store_as: pipeline_api_host
+    post_check:
+      assert: pipeline_api_host is not empty
+      command: "oc get route -n {{ project_namespace }} -l app=ds-pipeline -o jsonpath='{.items[0].spec.host}' 2>/dev/null | wc -c | tr -d ' '"
+      expected_min: 1
+      timeout: "30s"
+      on_fail: STOP
+
+  - id: get-token
+    confidence: doc-derived
+    description: Get cluster token for API auth
+    action:
+      type: query
+      command: "oc whoami -t"
+      store_as: oc_token
+    post_check:
+      assert: oc_token is not empty
+      command: "oc whoami -t"
+      expected_min: 1
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: upload-pipeline
+    confidence: inferred
+    description: Upload pipeline definition to DSP API
+    action:
+      type: api_call
+      method: POST
+      url: "https://{{ pipeline_api_host }}/apis/v2beta1/pipelines/upload?name={{ pipeline_name }}"
+      headers:
+        Authorization: "Bearer {{ oc_token }}"
+      body: ""
+      store_response_as: uploaded_pipeline
+    post_check:
+      assert: uploaded_pipeline is not empty
+      command: "echo ok"
+      expected: "ok"
+      timeout: "30s"
+      on_fail: STOP
+
+  - id: create-pipeline-run
+    confidence: inferred
+    description: Create a pipeline run from the uploaded pipeline
+    action:
+      type: api_call
+      method: POST
+      url: "https://{{ pipeline_api_host }}/apis/v2beta1/runs"
+      headers:
+        Content-Type: "application/json"
+        Authorization: "Bearer {{ oc_token }}"
+      body: |
+        {
+          "display_name": "{{ run_name }}",
+          "pipeline_version_reference": {
+            "pipeline_id": "{{ uploaded_pipeline.pipeline_id }}"
+          },
+          "runtime_config": {
+            "parameters": {}
+          }
+        }
+      store_response_as: pipeline_run
+    post_check:
+      assert: pipeline_run is not empty
+      command: "echo ok"
+      expected: "ok"
+      timeout: "30s"
+      on_fail: STOP
+    return: |
+      ✓ Pipeline run created.
+
+      Pipeline: {{ pipeline_name }}
+      Run: {{ run_name }}
+      Run ID: {{ pipeline_run.run_id }}
+
+      Dashboard: Projects → {{ project_namespace }} → Pipelines → Runs → {{ run_name }}
+
+known_bad_patterns:
+  - "never upload pipelines compiled with an older KFP SDK version than the server supports"
+  - "never create a run without first verifying the pipeline uploaded successfully"
+  - "never use the v1 API — RHOAI 2.x uses v2beta1"
+
+rollback_order:
+  - "DELETE https://{{ pipeline_api_host }}/apis/v2beta1/runs/{{ pipeline_run.run_id }}"
+  - "DELETE https://{{ pipeline_api_host }}/apis/v2beta1/pipelines/{{ uploaded_pipeline.pipeline_id }}"

@@ -1,0 +1,210 @@
+name: pipelines-compile-and-submit-pipeline
+description: >
+  Complete KFP pipeline workflow: write a component, define a pipeline,
+  compile to YAML, upload to DSP, and create a run.
+  Uses KFP SDK v2 which produces IR YAML (not Argo YAML).
+  ODH DSP uses datasciencepipelinesapplications.opendatahub.io/v1alpha1.
+rhoai_version_tested: null
+confidence_overall: doc-derived
+
+parameters:
+  - name: project_namespace
+    description: Project namespace with a running DSP pipeline server
+    required: true
+    discover_cmd: "oc get dspa --all-namespaces --no-headers -o jsonpath='{range .items[*]}{.metadata.namespace}{\"\\n\"}{end}' 2>/dev/null"
+    hint: "Must have a running pipeline server (DSPA). If none exists, run: odh run pipelines/create-pipeline-server"
+    example: "my-data-science-project"
+  - name: pipeline_name
+    description: Name for the pipeline (used as display name and resource identifier)
+    required: true
+    example: "my-training-pipeline"
+    hint: "A descriptive name for the pipeline. Can contain hyphens."
+  - name: experiment_name
+    description: KFP experiment name to group runs under
+    required: false
+    default: "{{ pipeline_name }}-experiments"
+    hint: "Experiments are like folders that group related pipeline runs. Leave as default to use pipeline name."
+  - name: run_name
+    description: Name for this specific pipeline run
+    required: false
+    default: "{{ pipeline_name }}-run-1"
+    hint: "Include a timestamp or version to distinguish runs: my-pipeline-2024-01-15"
+
+steps:
+  - id: check-dspa-ready
+    confidence: doc-derived
+    description: Verify pipeline server (DSPA) is ready in the project
+    requires:
+      - type: dsp-enabled
+      - type: namespace
+        name: "{{ project_namespace }}"
+      - type: pipeline-server
+        namespace: "{{ project_namespace }}"
+    pre_check:
+      command: "oc get dspa -n {{ project_namespace }} -o jsonpath='{.items[0].status.conditions[?(@.type==\"APIServerReady\")].status}' 2>/dev/null"
+      expected: "True"
+      on_fail: STOP
+    action:
+      type: none
+    post_check:
+      command: "oc get dspa -n {{ project_namespace }} -o jsonpath='{.items[0].status.conditions[?(@.type==\"APIServerReady\")].status}' 2>/dev/null"
+      expected: "True"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: get-pipeline-api-url
+    confidence: inferred
+    description: Get the pipeline API server URL
+    action:
+      type: query
+      command: "oc get route -n {{ project_namespace }} -l app=ds-pipeline -o jsonpath='{.items[0].spec.host}' 2>/dev/null"
+      store_as: pipeline_api_host
+    post_check:
+      assert: pipeline_api_host is not empty
+      command: "oc get route -n {{ project_namespace }} -l app=ds-pipeline -o jsonpath='{.items[0].spec.host}'"
+      expected_min: 1
+      timeout: "30s"
+      on_fail: STOP
+
+  - id: get-token
+    confidence: doc-derived
+    description: Get cluster token for API auth
+    action:
+      type: query
+      command: "oc whoami -t"
+      store_as: oc_token
+    post_check:
+      assert: oc_token is not empty
+      command: "oc whoami -t"
+      expected_min: 1
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: create-experiment
+    confidence: doc-derived
+    description: Create KFP experiment to group runs
+    action:
+      type: api_call
+      method: POST
+      url: "https://{{ pipeline_api_host }}/apis/v2beta1/experiments"
+      headers:
+        Content-Type: "application/json"
+        Authorization: "Bearer {{ oc_token }}"
+      body: |
+        {
+          "display_name": "{{ experiment_name }}",
+          "description": "Experiment for {{ pipeline_name }} runs",
+          "namespace": "{{ project_namespace }}"
+        }
+      store_response_as: experiment
+    post_check:
+      assert: experiment is not empty
+      command: "echo ok"
+      expected: "ok"
+      timeout: "15s"
+      on_fail: STOP
+
+  - id: upload-pipeline
+    confidence: doc-derived
+    description: Upload pipeline YAML to DSP server (compile your pipeline locally first with kfp.compiler.Compiler)
+    action:
+      type: api_call
+      method: POST
+      url: "https://{{ pipeline_api_host }}/apis/v2beta1/pipelines/upload?name={{ pipeline_name }}&namespace={{ project_namespace }}"
+      headers:
+        Authorization: "Bearer {{ oc_token }}"
+      body: ""
+      store_response_as: uploaded_pipeline
+    post_check:
+      assert: uploaded_pipeline is not empty
+      command: "echo ok"
+      expected: "ok"
+      timeout: "30s"
+      on_fail: STOP
+
+  - id: create-run
+    confidence: doc-derived
+    description: Create a pipeline run from the uploaded pipeline
+    action:
+      type: api_call
+      method: POST
+      url: "https://{{ pipeline_api_host }}/apis/v2beta1/runs"
+      headers:
+        Content-Type: "application/json"
+        Authorization: "Bearer {{ oc_token }}"
+      body: |
+        {
+          "display_name": "{{ run_name }}",
+          "description": "Run created by ODH assistant",
+          "pipeline_version_reference": {
+            "pipeline_id": "{{ uploaded_pipeline.pipeline_id }}"
+          },
+          "experiment_id": "{{ experiment.experiment_id }}",
+          "runtime_config": {
+            "parameters": {}
+          },
+          "namespace": "{{ project_namespace }}"
+        }
+      store_response_as: pipeline_run
+    post_check:
+      assert: pipeline_run is not empty
+      command: "echo ok"
+      expected: "ok"
+      timeout: "15s"
+      on_fail: STOP
+    return: |
+      ✓ Pipeline run created.
+
+      Pipeline: {{ pipeline_name }} (ID: {{ uploaded_pipeline.pipeline_id }})
+      Run:      {{ run_name }} (ID: {{ pipeline_run.run_id }})
+      Experiment: {{ experiment_name }}
+
+      Dashboard: Projects → {{ project_namespace }} → Pipelines → Runs → {{ run_name }}
+      API:       https://{{ pipeline_api_host }}/apis/v2beta1/runs/{{ pipeline_run.run_id }}
+
+      ────────────────────────────────────────────────────────
+      Compile your pipeline locally first:
+
+        from kfp import dsl, compiler
+
+        @dsl.component(base_image="python:3.11")
+        def train_model(
+            learning_rate: float,
+            output_model: dsl.Output[dsl.Model]
+        ) -> float:
+            # Your training code here
+            accuracy = 0.95
+            with open(output_model.path, 'w') as f:
+                f.write("model weights")
+            return accuracy
+
+        @dsl.pipeline(name="{{ pipeline_name }}")
+        def my_pipeline(learning_rate: float = 0.001):
+            train_task = train_model(learning_rate=learning_rate)
+            train_task.set_cpu_limit("2")
+            train_task.set_memory_limit("4Gi")
+
+        compiler.Compiler().compile(my_pipeline, "pipeline.yaml")
+
+      Then upload pipeline.yaml via the dashboard or with the kfp.Client:
+        from kfp import Client
+        client = Client(host="https://{{ pipeline_api_host }}")
+        client.create_run_from_pipeline_func(
+            my_pipeline,
+            arguments={"learning_rate": 0.001},
+            experiment_name="{{ experiment_name }}",
+            run_name="{{ run_name }}"
+        )
+      ────────────────────────────────────────────────────────
+
+known_bad_patterns:
+  - "never use KFP SDK v1 (kfp-tekton) with DSP 2.x — it produces incompatible Tekton YAML"
+  - "never compile a pipeline with @pipeline decorator but no @component decorators — it will fail"
+  - "never pass large data between components as parameters — use Output[Dataset]/Input[Dataset] artifacts instead"
+  - "never use local file paths in component code — all I/O must go through artifact URIs (S3, GCS)"
+  - "never set parallelism to unlimited on ParallelFor with large datasets — use parallelism=N"
+
+rollback_order:
+  - "DELETE https://{{ pipeline_api_host }}/apis/v2beta1/runs/{{ pipeline_run.run_id }}"
+  - "DELETE https://{{ pipeline_api_host }}/apis/v2beta1/pipelines/{{ uploaded_pipeline.pipeline_id }}"
+  - "DELETE https://{{ pipeline_api_host }}/apis/v2beta1/experiments/{{ experiment.experiment_id }}"

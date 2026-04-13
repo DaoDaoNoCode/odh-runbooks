@@ -1,0 +1,159 @@
+name: model-registry-search-and-compare-models
+description: >
+  Search and compare models in the ODH Model Registry.
+  Supports filtering by name, state, owner, and custom properties.
+  The REST API uses /api/model_registry/v1alpha3 endpoints.
+  Use this to discover models before deployment or to audit registered models.
+rhoai_version_tested: null
+confidence_overall: doc-derived
+
+parameters:
+  - name: registry_name
+    description: Model registry instance name
+    required: false
+    default: model-registry
+  - name: registry_namespace
+    description: Registry namespace
+    required: false
+    default: odh-model-registries
+  - name: search_name
+    description: Filter by model name (partial match supported)
+    required: false
+    default: ""
+
+steps:
+  - id: get-registry-token
+    confidence: doc-derived
+    description: Get auth token
+    requires:
+      - type: model-registry-instance
+    action:
+      type: query
+      command: "oc whoami -t"
+      store_as: oc_token
+    post_check:
+      assert: oc_token is not empty
+      command: "oc whoami -t"
+      expected_min: 1
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: get-registry-url
+    confidence: inferred
+    description: Get model registry REST API URL
+    action:
+      type: query
+      command: "oc get route {{ registry_name }}-rest -n {{ registry_namespace }} -o jsonpath='{.spec.host}' 2>/dev/null"
+      store_as: registry_host
+    post_check:
+      assert: registry_host is not empty
+      command: "oc get route {{ registry_name }}-rest -n {{ registry_namespace }} -o jsonpath='{.spec.host}'"
+      expected_min: 1
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: list-registered-models
+    confidence: doc-derived
+    description: List all LIVE registered models, filtered by name if provided
+    action:
+      type: api_call
+      method: GET
+      url: "https://{{ registry_host }}/api/model_registry/v1alpha3/registered_models?state=LIVE&pageSize=50&orderBy=name&sortOrder=ASC"
+      headers:
+        Authorization: "Bearer {{ oc_token }}"
+        Content-Type: "application/json"
+      store_response_as: models_list
+    post_check:
+      assert: models_list is not empty
+      command: "echo ok"
+      expected: "ok"
+      timeout: "15s"
+      on_fail: STOP
+
+  - id: get-model-versions
+    confidence: doc-derived
+    description: Fetch versions for models (first model as example)
+    action:
+      type: api_call
+      method: GET
+      url: "https://{{ registry_host }}/api/model_registry/v1alpha3/model_versions?state=LIVE&pageSize=20&orderBy=createTimeSinceEpoch&sortOrder=DESC"
+      headers:
+        Authorization: "Bearer {{ oc_token }}"
+        Content-Type: "application/json"
+      store_response_as: versions_list
+    post_check:
+      assert: versions_list is not empty
+      command: "echo ok"
+      expected: "ok"
+      timeout: "15s"
+      on_fail: STOP
+    return: |
+      ✓ Model Registry search complete.
+
+      Registry: {{ registry_name }}
+      URL: https://{{ registry_host }}/api/model_registry/v1alpha3
+
+      ────────────────────────────────────────────────────────
+      Python client equivalent (pip install model-registry):
+
+        from model_registry import ModelRegistry
+        registry = ModelRegistry(
+            server_address="https://{{ registry_host }}",
+            author="my-team"
+        )
+
+        # List all models:
+        for model in registry.get_registered_models():
+            print(f"{model.name} ({model.id})")
+
+        # Get a specific model and its versions:
+        model = registry.get_registered_model("my-model-name")
+        for version in registry.get_model_versions("my-model-name"):
+            artifact = registry.get_model_artifact("my-model-name", version.name)
+            print(f"  v{version.name}: {artifact.uri}")
+
+        # Register a new model:
+        registry.register_model(
+            name="my-model",
+            uri="s3://bucket/model",
+            version="1.0.0",
+            model_format_name="vllm",
+            metadata={"accuracy": "0.95", "framework": "pytorch"}
+        )
+
+        # Register from HuggingFace:
+        registry.register_hf_model(
+            "meta-llama/Meta-Llama-3-8B",
+            "config.json",
+            model_name="llama3-8b",
+            version="1.0"
+        )
+
+      REST API patterns:
+        # Search by name:
+        GET /api/model_registry/v1alpha3/registered_models?name=my-model
+
+        # Filter by state:
+        GET /api/model_registry/v1alpha3/registered_models?state=ARCHIVED
+
+        # Get all versions of a model:
+        GET /api/model_registry/v1alpha3/registered_models/{id}/versions
+
+        # Get artifacts for a version:
+        GET /api/model_registry/v1alpha3/model_versions/{id}/artifacts
+
+        # Update model description:
+        PATCH /api/model_registry/v1alpha3/registered_models/{id}
+        Body: {"description": "new description", "customProperties": {"key": "value"}}
+
+        # Archive a model:
+        PATCH /api/model_registry/v1alpha3/registered_models/{id}
+        Body: {"state": "ARCHIVED"}
+      ────────────────────────────────────────────────────────
+
+known_bad_patterns:
+  - "never delete a registered model that has deployed InferenceServices — the deployment loses its registry link"
+  - "never use GET without pageSize — large registries will time out"
+  - "never confuse ODH Model Registry with MLflow Model Registry — they are separate systems"
+
+rollback_order: []

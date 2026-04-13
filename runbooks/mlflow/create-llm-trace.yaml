@@ -1,0 +1,129 @@
+name: mlflow-create-llm-trace
+description: >
+  Enable LLM observability tracing in MLflow for a deployed model.
+  MLflow Tracing records LLM inputs/outputs, latency, and token usage as Traces + Spans.
+  Supports auto-instrumentation (OpenAI, LangChain, LlamaIndex) and manual tracing.
+  This runbook shows how to configure auto-tracing and create manual traces via REST API.
+rhoai_version_tested: null
+confidence_overall: doc-derived
+
+parameters:
+  - name: mlflow_tracking_uri
+    description: MLflow server URL
+    required: true
+  - name: experiment_name
+    description: Experiment to log traces under
+    required: true
+
+steps:
+  - id: verify-mlflow-traces-supported
+    confidence: doc-derived
+    description: Verify MLflow version supports tracing (requires 2.14+)
+    action:
+      type: api_call
+      method: GET
+      url: "{{ mlflow_tracking_uri }}/api/2.0/mlflow/version"
+      headers:
+        Content-Type: "application/json"
+      store_response_as: mlflow_version
+    post_check:
+      assert: mlflow_version is not empty
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: get-or-create-experiment
+    confidence: doc-derived
+    description: Create experiment for trace storage
+    action:
+      type: api_call
+      method: POST
+      url: "{{ mlflow_tracking_uri }}/api/2.0/mlflow/experiments/create"
+      headers:
+        Content-Type: "application/json"
+      body: |
+        {
+          "name": "{{ experiment_name }}",
+          "tags": [{"key": "type", "value": "llm-tracing"}]
+        }
+      store_response_as: experiment
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: create-trace
+    confidence: doc-derived
+    description: Create a trace for an LLM inference request
+    action:
+      type: api_call
+      method: POST
+      url: "{{ mlflow_tracking_uri }}/api/2.0/mlflow/traces"
+      headers:
+        Content-Type: "application/json"
+      body: |
+        {
+          "experiment_id": "{{ experiment.experiment_id }}",
+          "timestamp_ms": 0,
+          "execution_time_ms": 1250,
+          "status": "OK",
+          "request_metadata": [
+            {"key": "mlflow.traceInputs", "value": "{\"messages\": [{\"role\": \"user\", \"content\": \"What is MLflow?\"}]}"},
+            {"key": "mlflow.traceOutputs", "value": "{\"choices\": [{\"message\": {\"role\": \"assistant\", \"content\": \"MLflow is an open source platform...\"}}]}"},
+            {"key": "mlflow.trace.name", "value": "chat_completion"}
+          ],
+          "tags": [
+            {"key": "model.name", "value": "llama3-8b"},
+            {"key": "token.usage.total", "value": "145"},
+            {"key": "token.usage.prompt", "value": "12"},
+            {"key": "token.usage.completion", "value": "133"}
+          ]
+        }
+      store_response_as: trace
+    post_check:
+      assert: trace is not empty
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+    return: |
+      ✓ LLM trace created in MLflow.
+
+      Experiment: {{ experiment_name }}
+      Trace ID:   {{ trace.trace_info.request_id }}
+
+      MLflow UI:  {{ mlflow_tracking_uri }}/#/experiments/{{ experiment.experiment_id }}
+                  (look for the Traces tab)
+
+      ────────────────────────────────────────────────────────
+      AUTO-INSTRUMENTATION (recommended for notebooks):
+
+      For OpenAI-compatible endpoints (vLLM, etc.):
+        import mlflow
+        import openai
+        mlflow.set_tracking_uri("{{ mlflow_tracking_uri }}")
+        mlflow.set_experiment("{{ experiment_name }}")
+        mlflow.openai.autolog()   # captures all OpenAI SDK calls
+        client = openai.OpenAI(base_url="your-vllm-endpoint/v1", api_key="none")
+        response = client.chat.completions.create(...)  # automatically traced
+
+      For manual tracing with decorator:
+        @mlflow.trace(name="my_llm_call", attributes={"model": "llama3"})
+        def call_llm(prompt: str) -> str:
+            return my_model.generate(prompt)
+
+      For manual tracing with context manager:
+        with mlflow.start_span(name="retrieval", inputs={"query": query}) as span:
+            docs = vector_db.search(query)
+            span.set_outputs({"num_docs": len(docs)})
+      ────────────────────────────────────────────────────────
+
+known_bad_patterns:
+  - "never use mlflow.openai.autolog() without setting the tracking URI first — traces go to the default local filesystem"
+  - "never log PII (user messages, personal info) in traces without data governance approval"
+  - "never create traces with execution_time_ms=0 in production — it breaks latency analysis"
+  - "use autolog() instead of manual tracing when possible — it captures token usage automatically"
+
+rollback_order: []

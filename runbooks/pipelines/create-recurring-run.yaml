@@ -1,0 +1,145 @@
+name: pipelines-create-recurring-run
+description: >
+  Schedule a KFP pipeline to run on a recurring schedule (cron or interval).
+  Recurring runs are managed via the DSP v2beta1 /recurringruns API.
+  Supports cron expressions (Unix-style) and interval-based scheduling.
+rhoai_version_tested: null
+confidence_overall: doc-derived
+
+parameters:
+  - name: project_namespace
+    description: Project namespace with running DSP server
+    required: true
+  - name: pipeline_id
+    description: Pipeline ID from upload-pipeline output
+    required: true
+  - name: experiment_id
+    description: Experiment ID to group runs under
+    required: true
+  - name: job_name
+    description: Name for the recurring run schedule
+    required: true
+  - name: cron_expression
+    description: "Cron schedule (e.g. '0 9 * * 1-5' = 9am Mon-Fri). Leave empty to use interval."
+    required: false
+    default: "0 9 * * *"
+  - name: max_concurrency
+    description: Maximum parallel runs allowed at once
+    required: false
+    default: "1"
+  - name: start_time
+    description: "ISO 8601 start time (e.g. 2024-01-01T00:00:00Z). Empty = now."
+    required: false
+    default: ""
+
+steps:
+  - id: get-pipeline-api-url
+    confidence: inferred
+    description: Get the pipeline API server URL
+    requires:
+      - type: dsp-enabled
+      - type: namespace
+        name: "{{ project_namespace }}"
+      - type: pipeline-server
+        namespace: "{{ project_namespace }}"
+    action:
+      type: query
+      command: "oc get route -n {{ project_namespace }} -l app=ds-pipeline -o jsonpath='{.items[0].spec.host}' 2>/dev/null"
+      store_as: pipeline_api_host
+    post_check:
+      assert: pipeline_api_host is not empty
+      command: "oc get route -n {{ project_namespace }} -l app=ds-pipeline -o jsonpath='{.items[0].spec.host}'"
+      expected_min: 1
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: get-token
+    confidence: doc-derived
+    description: Get auth token
+    action:
+      type: query
+      command: "oc whoami -t"
+      store_as: oc_token
+    post_check:
+      assert: oc_token is not empty
+      command: "oc whoami -t"
+      expected_min: 1
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: create-recurring-run
+    confidence: doc-derived
+    description: Create a cron-scheduled recurring pipeline run
+    action:
+      type: api_call
+      method: POST
+      url: "https://{{ pipeline_api_host }}/apis/v2beta1/recurringruns"
+      headers:
+        Content-Type: "application/json"
+        Authorization: "Bearer {{ oc_token }}"
+      body: |
+        {
+          "display_name": "{{ job_name }}",
+          "description": "Recurring run: {{ job_name }}",
+          "pipeline_version_reference": {
+            "pipeline_id": "{{ pipeline_id }}"
+          },
+          "experiment_id": "{{ experiment_id }}",
+          "namespace": "{{ project_namespace }}",
+          "trigger": {
+            "cron_schedule": {
+              "cron": "{{ cron_expression }}",
+              "start_time": "{{ start_time }}",
+              "end_time": null
+            }
+          },
+          "max_concurrency": "{{ max_concurrency }}",
+          "no_catchup": false,
+          "mode": "ENABLE",
+          "runtime_config": {
+            "parameters": {}
+          }
+        }
+      store_response_as: recurring_run
+    post_check:
+      assert: recurring_run is not empty
+      command: "echo ok"
+      expected: "ok"
+      timeout: "15s"
+      on_fail: STOP
+    return: |
+      ✓ Recurring run scheduled.
+
+      Job name:    {{ job_name }}
+      Schedule:    {{ cron_expression }}
+      Pipeline ID: {{ pipeline_id }}
+      Run ID:      {{ recurring_run.recurring_run_id }}
+      Status:      ENABLED
+
+      Dashboard: Projects → {{ project_namespace }} → Pipelines → Schedules
+
+      Manage via API:
+        # Pause:
+        POST https://{{ pipeline_api_host }}/apis/v2beta1/recurringruns/{{ recurring_run.recurring_run_id }}:disable
+
+        # Resume:
+        POST https://{{ pipeline_api_host }}/apis/v2beta1/recurringruns/{{ recurring_run.recurring_run_id }}:enable
+
+        # Delete:
+        DELETE https://{{ pipeline_api_host }}/apis/v2beta1/recurringruns/{{ recurring_run.recurring_run_id }}
+
+      Common cron expressions:
+        "0 9 * * *"     = Every day at 9am UTC
+        "0 9 * * 1-5"   = Weekdays at 9am UTC
+        "0 */6 * * *"   = Every 6 hours
+        "0 0 * * 0"     = Every Sunday midnight
+        "*/30 * * * *"  = Every 30 minutes
+
+known_bad_patterns:
+  - "never set max_concurrency > 1 for pipelines with shared resources (databases, models) — runs will conflict"
+  - "never use no_catchup=false with a long-paused schedule — it will create a backfill of all missed runs"
+  - "never schedule without an end_time for time-limited experiments — set end_time to prevent runaway costs"
+  - "cron expressions use UTC — convert local time to UTC before setting"
+
+rollback_order:
+  - "DELETE https://{{ pipeline_api_host }}/apis/v2beta1/recurringruns/{{ recurring_run.recurring_run_id }}"

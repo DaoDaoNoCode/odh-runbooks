@@ -1,0 +1,152 @@
+name: rosa-install-rhoai-stable
+description: >
+  Install the current stable/released version of RHOAI on a ROSA-hosted cluster
+  from OperatorHub (no pre-release workaround needed).
+
+  For stable releases, use the official Red Hat catalog — no Kyverno or pull secret
+  workaround required since images come from publicly accessible registry.redhat.io.
+
+  For PRE-RELEASE (RC/nightly) installs, use: rosa/install-rhoai-prerelease instead.
+rhoai_version_tested: null
+confidence_overall: doc-derived
+
+parameters:
+  - name: channel
+    description: "OLM channel: fast | stable | eus-2.x"
+    required: false
+    default: fast
+  - name: install_plan_approval
+    description: "Automatic or Manual upgrade approval"
+    required: false
+    default: Automatic
+
+steps:
+  - id: verify-cluster-access
+    confidence: doc-derived
+    description: Verify logged into ROSA cluster as admin
+    requires:
+      - type: openshift-cluster
+    pre_check:
+      command: "oc auth can-i create namespace --all-namespaces 2>/dev/null"
+      expected: "yes"
+      on_fail: STOP
+    action:
+      type: none
+    post_check:
+      command: "oc auth can-i create namespace --all-namespaces 2>/dev/null"
+      expected: "yes"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: create-operator-namespace
+    confidence: doc-derived
+    description: Create the redhat-ods-operator namespace
+    pre_check:
+      command: "oc get namespace redhat-ods-operator --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: redhat-ods-operator
+    post_check:
+      command: "oc get namespace redhat-ods-operator -o jsonpath='{.status.phase}'"
+      expected: "Active"
+      timeout: "30s"
+      on_fail: STOP
+
+  - id: create-operator-group
+    confidence: doc-derived
+    description: Create OperatorGroup in redhat-ods-operator namespace
+    pre_check:
+      command: "oc get operatorgroup -n redhat-ods-operator --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: operators.coreos.com/v1
+        kind: OperatorGroup
+        metadata:
+          name: rhods-operator
+          namespace: redhat-ods-operator
+    post_check:
+      command: "oc get operatorgroup -n redhat-ods-operator --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "30s"
+      on_fail: STOP
+
+  - id: create-subscription
+    confidence: doc-derived
+    description: Create OLM Subscription for RHOAI from the official Red Hat catalog
+    pre_check:
+      command: "oc get subscription rhods-operator -n redhat-ods-operator --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: operators.coreos.com/v1alpha1
+        kind: Subscription
+        metadata:
+          name: rhods-operator
+          namespace: redhat-ods-operator
+        spec:
+          channel: "{{ channel }}"
+          installPlanApproval: "{{ install_plan_approval }}"
+          name: rhods-operator
+          source: redhat-operators
+          sourceNamespace: openshift-marketplace
+    post_check:
+      command: "oc get subscription rhods-operator -n redhat-ods-operator --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "30s"
+      on_fail: STOP
+    rollback: "oc delete subscription rhods-operator -n redhat-ods-operator 2>/dev/null || true"
+
+  - id: wait-csv-succeeded
+    confidence: doc-derived
+    description: Wait for the RHOAI CSV to reach Succeeded phase (can take 5-10 min)
+    action:
+      type: query
+      command: "oc get csv -n redhat-ods-operator --no-headers 2>/dev/null | grep -i 'rhods\|openshift-ai' | awk '{print $1}' | head -1"
+      store_as: csv_name
+    post_check:
+      command: "oc get csv -n redhat-ods-operator --no-headers 2>/dev/null | grep -i 'rhods\|openshift-ai' | awk '{print $NF}'"
+      expected: "Succeeded"
+      timeout: "600s"
+      poll_interval: "20s"
+      on_fail: STOP
+    return: |
+      ✓ RHOAI stable installed from OperatorHub.
+
+      Channel:   {{ channel }}
+      Namespace: redhat-ods-operator
+      CSV:       {{ csv_name }}
+
+      Verify:
+        oc get csv -n redhat-ods-operator
+        oc get pods -n redhat-ods-applications
+
+      Next step: Create a DataScienceCluster to enable components:
+        odh run cluster/full-stack-setup -p ...
+
+      NOTE: For pre-release testing, use rosa/install-rhoai-prerelease instead.
+
+known_bad_patterns:
+  - "never use this runbook for pre-release/RC testing — use rosa/install-rhoai-prerelease which handles the Kyverno pull secret workaround"
+  - "never create the subscription before the OperatorGroup — OLM will fail"
+
+rollback_order:
+  - "oc delete subscription rhods-operator -n redhat-ods-operator 2>/dev/null || true"
+  - "oc delete operatorgroup rhods-operator -n redhat-ods-operator 2>/dev/null || true"
+  - "oc delete namespace redhat-ods-operator 2>/dev/null || true"

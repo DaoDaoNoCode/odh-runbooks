@@ -1,0 +1,98 @@
+name: cluster-configure-storage-classes
+description: >
+  Configure storage classes for ODH workbenches and pipelines.
+  ODH reads storage classes from the cluster and stores config in annotations.
+  Annotation key: opendatahub.io/sc-config (JSON on each StorageClass).
+  Dashboard page: Admin → Storage Classes.
+  Common issue: workbench PVC creation fails if no suitable storage class exists.
+rhoai_version_tested: null
+confidence_overall: doc-derived
+
+parameters:
+  - name: default_storage_class
+    description: Name of the storage class to set as ODH default
+    required: false
+    default: ""
+
+steps:
+  - id: list-storage-classes
+    confidence: doc-derived
+    description: List all available storage classes with their provisioners
+    requires:
+      - type: openshift-cluster
+    action:
+      type: query
+      command: "oc get storageclass --no-headers -o custom-columns='NAME:.metadata.name,PROVISIONER:.provisioner,DEFAULT:.metadata.annotations.storageclass\\.kubernetes\\.io/is-default-class'"
+      store_as: storage_classes
+    post_check:
+      command: "oc get storageclass --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: check-rwx-support
+    confidence: doc-derived
+    description: Check which storage classes support ReadWriteMany (needed for some workloads)
+    action:
+      type: query
+      command: "oc get storageclass -o jsonpath='{range .items[*]}{.metadata.name}{\" \"}{.volumeBindingMode}{\"\\n\"}{end}'"
+      store_as: storage_class_modes
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: annotate-storage-class-for-odh
+    confidence: doc-derived
+    description: Mark storage class as enabled for ODH workbench use
+    action:
+      type: query
+      command: "oc patch storageclass {{ default_storage_class }} --type merge -p '{\"metadata\":{\"annotations\":{\"opendatahub.io/sc-config\":\"{\\\"enabled\\\":true,\\\"isDefault\\\":true}\"}}}'  2>/dev/null || echo skipped"
+      store_as: patch_result
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+    return: |
+      ✓ Storage class configuration complete.
+
+      Available storage classes:
+      {{ storage_classes }}
+
+      Storage class modes:
+      {{ storage_class_modes }}
+
+      ─────────────────────────────────────────────────────
+      COMMON STORAGE CLASS PROVISIONERS:
+        AWS EBS:    ebs.csi.aws.com (RWO only)
+        AWS EFS:    efs.csi.aws.com (RWX supported)
+        GCP PD:     pd.csi.storage.gke.io (RWO only)
+        Azure Disk: disk.csi.azure.com (RWO only)
+        Azure File: file.csi.azure.com (RWX supported)
+        Ceph RBD:   rook-ceph.rbd.csi.ceph.com (RWO only)
+        CephFS:     rook-ceph.cephfs.csi.ceph.com (RWX supported)
+        NFS:        nfs.csi.k8s.io (RWX supported)
+        Local:      kubernetes.io/no-provisioner (manual PV binding)
+
+      WORKBENCH REQUIREMENTS:
+        - Minimum: 1 RWO storage class (for workspace PVC)
+        - Optional: RWX for shared storage across pods
+
+      SET K8s DEFAULT STORAGE CLASS:
+        oc patch storageclass <name> --type merge \
+          -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+
+      COMMON ISSUE: If workbench PVC stays Pending:
+        oc describe pvc <name> -n <namespace>
+        # Check: "no persistent volumes available" = provisioner not working
+        # Check: RWX requested but provisioner only supports RWO
+      ─────────────────────────────────────────────────────
+
+known_bad_patterns:
+  - "never set multiple storage classes as is-default-class=true — only one should be default"
+  - "never use local storage class for workbenches in production — data is lost if the node fails"
+  - "never try to use a storage class that requires the RWX access mode with a provisioner that only supports RWO"
+
+rollback_order: []

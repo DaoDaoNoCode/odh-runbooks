@@ -1,0 +1,212 @@
+name: observability-enable-perses-dashboard
+description: >
+  Deploy a Perses observability dashboard for monitoring ODH models and components.
+  Perses is the CNCF-standard dashboard framework used by ODH (ADR-Operator-0011).
+  Standard datasources: data-science-prometheus-datasource, tempo-datasource.
+  Dashboards are declarative PersesDashboard CRs managed by the Perses Operator.
+rhoai_version_tested: null
+confidence_overall: inferred
+
+parameters:
+  - name: project_namespace
+    description: Namespace to deploy monitoring for
+    required: true
+  - name: model_name
+    description: Name of the model to monitor
+    required: true
+  - name: prometheus_url
+    description: Prometheus endpoint URL
+    required: false
+    default: "http://prometheus-operated.openshift-monitoring.svc:9090"
+
+steps:
+  - id: check-perses-operator
+    confidence: inferred
+    description: Verify Perses Operator CRD is installed
+    requires:
+      - type: namespace
+        name: "{{ project_namespace }}"
+    pre_check:
+      command: "oc get crd persesdashboards.perses.dev --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      on_fail: STOP
+    action:
+      type: none
+    post_check:
+      command: "oc get crd persesdashboards.perses.dev --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: create-perses-datasource
+    confidence: inferred
+    description: Create Prometheus datasource for the dashboard
+    pre_check:
+      command: "oc get persesdatasource data-science-prometheus -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: perses.dev/v1alpha2
+        kind: PersesDatasource
+        metadata:
+          name: data-science-prometheus-datasource
+          namespace: {{ project_namespace }}
+        spec:
+          config:
+            name: data-science-prometheus-datasource
+            spec:
+              plugin:
+                kind: TempoDataSource
+                spec:
+                  directUrl: "{{ prometheus_url }}"
+    post_check:
+      command: "oc get persesdatasource data-science-prometheus-datasource -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      timeout: "30s"
+      on_fail: STOP
+
+  - id: create-model-monitoring-dashboard
+    confidence: inferred
+    description: Create a PersesDashboard for model performance monitoring
+    pre_check:
+      command: "oc get persesdashboard data-science-{{ model_name }}-monitoring -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: perses.dev/v1alpha2
+        kind: PersesDashboard
+        metadata:
+          name: data-science-{{ model_name }}-monitoring
+          namespace: {{ project_namespace }}
+          labels:
+            opendatahub.io/dashboard: "true"
+        spec:
+          display:
+            name: "{{ model_name }} Model Monitoring"
+            description: "Inference metrics, drift, and fairness for {{ model_name }}"
+          variables: []
+          panels:
+            inference-requests:
+              kind: Panel
+              spec:
+                display:
+                  name: "Inference Requests/sec"
+                plugin:
+                  kind: TimeSeriesChart
+                  spec:
+                    legend:
+                      position: bottom
+                queries:
+                  - kind: TimeSeriesQuery
+                    spec:
+                      plugin:
+                        kind: PrometheusTimeSeriesQuery
+                        spec:
+                          datasource:
+                            name: data-science-prometheus-datasource
+                          query: 'rate(inference_service_request_total{namespace="{{ project_namespace }}",service="{{ model_name }}"}[5m])'
+            inference-latency:
+              kind: Panel
+              spec:
+                display:
+                  name: "P95 Latency (seconds)"
+                plugin:
+                  kind: GaugeChart
+                  spec:
+                    calculation: LastNumber
+                    thresholds:
+                      steps:
+                        - value: 0.5
+                          color: green
+                        - value: 1.0
+                          color: yellow
+                        - value: 2.0
+                          color: red
+                queries:
+                  - kind: TimeSeriesQuery
+                    spec:
+                      plugin:
+                        kind: PrometheusTimeSeriesQuery
+                        spec:
+                          datasource:
+                            name: data-science-prometheus-datasource
+                          query: 'histogram_quantile(0.95, rate(inference_service_duration_seconds_bucket{namespace="{{ project_namespace }}",service="{{ model_name }}"}[5m]))'
+            model-errors:
+              kind: Panel
+              spec:
+                display:
+                  name: "Error Rate"
+                plugin:
+                  kind: StatChart
+                  spec:
+                    calculation: LastNumber
+                queries:
+                  - kind: TimeSeriesQuery
+                    spec:
+                      plugin:
+                        kind: PrometheusTimeSeriesQuery
+                        spec:
+                          datasource:
+                            name: data-science-prometheus-datasource
+                          query: 'rate(inference_service_errors_total{namespace="{{ project_namespace }}",service="{{ model_name }}"}[5m])'
+          layouts:
+            - kind: Grid
+              spec:
+                display:
+                  title: Overview
+                items:
+                  - x: 0
+                    y: 0
+                    width: 4
+                    height: 6
+                    content:
+                      $ref: "#/spec/panels/inference-requests"
+                  - x: 4
+                    y: 0
+                    width: 4
+                    height: 6
+                    content:
+                      $ref: "#/spec/panels/inference-latency"
+                  - x: 8
+                    y: 0
+                    width: 4
+                    height: 6
+                    content:
+                      $ref: "#/spec/panels/model-errors"
+    post_check:
+      command: "oc get persesdashboard data-science-{{ model_name }}-monitoring -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      timeout: "30s"
+      on_fail: STOP
+    rollback: "oc delete persesdashboard data-science-{{ model_name }}-monitoring -n {{ project_namespace }}"
+    return: |
+      ✓ Perses monitoring dashboard created.
+
+      Dashboard: data-science-{{ model_name }}-monitoring
+      Namespace: {{ project_namespace }}
+      Panels: Inference requests/sec, P95 latency, Error rate
+
+      Dashboard naming convention (ADR-Operator-0011):
+        data-science-{component}-{purpose}
+        e.g. data-science-{{ model_name }}-monitoring
+
+      Access via Perses UI:
+        oc port-forward svc/perses 8080:8080 -n perses-system
+        http://localhost:8080
+
+known_bad_patterns:
+  - "never name dashboards outside the data-science-{component}-{purpose} convention — it breaks the operator"
+  - "never use Grafana — ODH standardized on Perses (ADR-Operator-0011)"
+  - "never hardcode timestamps in dashboard queries — use relative time like [5m] or [1h]"
+
+rollback_order:
+  - "oc delete persesdashboard data-science-{{ model_name }}-monitoring -n {{ project_namespace }}"
+  - "oc delete persesdatasource data-science-prometheus-datasource -n {{ project_namespace }}"

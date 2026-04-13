@@ -1,0 +1,158 @@
+name: cluster-enable-feature-store
+description: >
+  Enable the Feast Feature Store operator in DataScienceCluster.
+  Feast manages ML feature infrastructure for training and inference.
+  Provides offline store (batch training) + online store (real-time serving).
+  After enabling, create FeatureStore CRs per project to manage feature definitions.
+rhoai_version_tested: null
+confidence_overall: doc-derived
+
+parameters:
+  - name: project_namespace
+    description: Project namespace to deploy a FeatureStore instance in
+    required: true
+  - name: online_store_type
+    description: "Online store backend: redis | sqlite (dev only)"
+    required: false
+    default: sqlite
+  - name: offline_store_type
+    description: "Offline store backend: file | bigquery | snowflake | postgres"
+    required: false
+    default: file
+  - name: registry_path
+    description: "Path for feature registry (file path or GCS/S3 URI)"
+    required: false
+    default: /tmp/feast-registry.db
+
+steps:
+  - id: enable-feast-operator
+    confidence: doc-derived
+    description: Enable Feast operator in DataScienceCluster
+    requires:
+      - type: dsc-exists
+    pre_check:
+      command: "oc get dsc -o jsonpath='{.items[0].spec.components.feastoperator.managementState}'"
+      expected: "Managed"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: patch
+      target: "$(oc get dsc -o name | head -1)"
+      patch: '{"spec":{"components":{"feastoperator":{"managementState":"Managed"}}}}'
+      dry_run: false
+    post_check:
+      command: "oc get dsc -o jsonpath='{.items[0].spec.components.feastoperator.managementState}'"
+      expected: "Managed"
+      timeout: "30s"
+      on_fail: STOP
+
+  - id: wait-feast-operator-ready
+    confidence: inferred
+    description: Wait for Feast operator to be ready
+    action:
+      type: wait
+      command: "oc wait deployment -l app.kubernetes.io/name=feast-operator -n redhat-ods-applications --for=condition=Available --timeout=300s"
+    post_check:
+      command: "oc get crd featurestores.feast.dev --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "300s"
+      poll_interval: "15s"
+      on_fail: STOP
+
+  - id: create-feature-store-instance
+    confidence: inferred
+    description: Create a FeatureStore CR in the project namespace
+    requires:
+      - type: namespace
+        name: "{{ project_namespace }}"
+    pre_check:
+      command: "oc get featurestore -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: feast.dev/v1alpha1
+        kind: FeatureStore
+        metadata:
+          name: feature-store
+          namespace: {{ project_namespace }}
+          labels:
+            opendatahub.io/dashboard: "true"
+        spec:
+          feastProject: my_project
+          services:
+            offlineStore:
+              persistence:
+                filePersistence:
+                  type: {{ offline_store_type }}
+            onlineStore:
+              persistence:
+                filePersistence:
+                  type: {{ online_store_type }}
+            registry:
+              local:
+                persistence:
+                  filePersistence:
+                    path: {{ registry_path }}
+    post_check:
+      command: "oc get featurestore -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "120s"
+      on_fail: STOP
+    rollback: "oc delete featurestore feature-store -n {{ project_namespace }}"
+    return: |
+      ✓ Feature Store enabled and instance created.
+
+      CRD: feast.dev/v1alpha1 FeatureStore
+      Instance: feature-store in {{ project_namespace }}
+      Online store: {{ online_store_type }}
+      Offline store: {{ offline_store_type }}
+
+      ─────────────────────────────────────────────────────
+      Define features in your notebook (pip install feast):
+
+        from feast import FeatureStore, Entity, FeatureView, Field
+        from feast.types import Float64, Int64
+        from datetime import timedelta
+
+        store = FeatureStore(repo_path=".")
+
+        customer = Entity(name="customer_id", value_type=Int64)
+
+        customer_features = FeatureView(
+            name="customer_features",
+            entities=[customer],
+            ttl=timedelta(days=1),
+            schema=[
+                Field(name="age", dtype=Float64),
+                Field(name="credit_score", dtype=Float64),
+                Field(name="income", dtype=Float64),
+            ],
+            source=your_data_source,
+        )
+
+        store.apply([customer, customer_features])
+        store.materialize_incremental(end_date=datetime.now())
+
+      Retrieve features for inference:
+        features = store.get_online_features(
+            features=["customer_features:age", "customer_features:credit_score"],
+            entity_rows=[{"customer_id": 42}]
+        ).to_dict()
+
+      REST API (Feature Server):
+        POST http://feast-feature-server/get-online-features
+        Body: {"features": ["view:field"], "entities": {"id": [1,2,3]}}
+      ─────────────────────────────────────────────────────
+
+known_bad_patterns:
+  - "never use sqlite online store in production — it doesn't support concurrent access"
+  - "never run feast materialize without first running feast apply — registry must exist"
+  - "never define features that aren't in the offline store schema — they will silently return None"
+
+rollback_order:
+  - "oc delete featurestore feature-store -n {{ project_namespace }}"
+  - "oc patch $(oc get dsc -o name | head -1) --type merge -p '{\"spec\":{\"components\":{\"feastoperator\":{\"managementState\":\"Removed\"}}}}'"

@@ -1,0 +1,134 @@
+name: cluster-create-hardware-profile
+description: >
+  Create a HardwareProfile resource that defines compute tiers for workbenches and pipelines.
+  CORRECT API: dashboard.opendatahub.io/v1 (NOT v1alpha1 — source code uses 'v1')
+  Hardware profiles appear in the workbench creation form as "Container size" options.
+  Required annotations: opendatahub.io/display-name, opendatahub.io/disabled, opendatahub.io/modified-date
+  The identifiers array defines custom resources (e.g. GPUs) — CPU/memory go in node selector/tolerations.
+rhoai_version_tested: null
+confidence_overall: inferred
+
+parameters:
+  - name: profile_name
+    description: Internal name for the hardware profile (lowercase, hyphens)
+    required: true
+  - name: display_name
+    description: Display name shown in the dashboard size dropdown
+    required: true
+  - name: description
+    description: Description shown in dashboard
+    required: false
+    default: ""
+  - name: gpu_identifier
+    description: "GPU resource identifier (e.g. nvidia.com/gpu) — leave empty for CPU-only profile"
+    required: false
+    default: ""
+  - name: gpu_count
+    description: Number of GPUs (only used if gpu_identifier is set)
+    required: false
+    default: "1"
+
+steps:
+  - id: check-hardware-profile-crd
+    confidence: inferred
+    description: Find HardwareProfile CRD (name varies by ODH version)
+    requires:
+      - type: dsc-exists
+    action:
+      type: query
+      command: "oc api-resources --api-group=dashboard.opendatahub.io --no-headers 2>/dev/null | grep -i hardware | awk '{print $1}' | head -1"
+      store_as: hardware_profile_resource
+    post_check:
+      assert: hardware_profile_resource is not empty
+      command: "oc api-resources --api-group=dashboard.opendatahub.io --no-headers 2>/dev/null | grep -i hardware | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "15s"
+      on_fail: STOP
+
+  - id: detect-odh-namespace
+    confidence: doc-derived
+    description: Detect ODH namespace (redhat-ods-applications for RHOAI, opendatahub for ODH)
+    action:
+      type: query
+      command: |
+        oc get namespace redhat-ods-applications --no-headers 2>/dev/null | grep -q . \
+          && echo "redhat-ods-applications" || echo "opendatahub"
+      store_as: odh_namespace
+    post_check:
+      assert: odh_namespace is not empty
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: create-hardware-profile
+    confidence: inferred
+    description: >
+      Create HardwareProfile CR in the ODH namespace.
+      API version: dashboard.opendatahub.io/v1 (source code confirmed: kindApiVersion(HardwareProfileModel))
+      The identifiers array is for GPU/accelerator resources only.
+      CPU and memory limits are applied through the workbench size selection, not the profile identifiers.
+    pre_check:
+      command: "oc get {{ hardware_profile_resource }} {{ profile_name }} -n {{ odh_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: dashboard.opendatahub.io/v1
+        kind: HardwareProfile
+        metadata:
+          name: {{ profile_name }}
+          namespace: {{ odh_namespace }}
+          annotations:
+            opendatahub.io/display-name: "{{ display_name }}"
+            opendatahub.io/description: "{{ description }}"
+            opendatahub.io/disabled: "false"
+            opendatahub.io/modified-date: "2024-01-01T00:00:00.000Z"
+        spec:
+          identifiers: []
+    post_check:
+      command: "oc get {{ hardware_profile_resource }} {{ profile_name }} -n {{ odh_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      timeout: "30s"
+      on_fail: STOP
+    rollback: "oc delete {{ hardware_profile_resource }} {{ profile_name }} -n {{ odh_namespace }}"
+    return: |
+      ✓ Hardware Profile created: {{ display_name }}
+
+      Dashboard: Admin → Hardware Profiles → {{ display_name }}
+      Users see it in: Create Workbench → Container size → {{ display_name }}
+
+      API used: dashboard.opendatahub.io/v1 HardwareProfile
+
+      To add GPU identifier to this profile (edit and patch):
+        oc patch {{ hardware_profile_resource }} {{ profile_name }} -n {{ odh_namespace }} \
+          --type merge -p '{
+            "spec": {
+              "identifiers": [{
+                "displayName": "GPU",
+                "identifier": "nvidia.com/gpu",
+                "minCount": "0",
+                "maxCount": "4",
+                "defaultCount": "1"
+              }]
+            }
+          }'
+
+      Standard ODH size profiles (created separately via workbench creation):
+        Small:   1 CPU  8Gi  — CPU/memory are set at workbench creation time, not in hardware profile
+        Medium:  3 CPU 24Gi
+        Large:   7 CPU 56Gi
+        X Large: 15 CPU 120Gi
+
+known_bad_patterns:
+  - "CRITICAL: API version must be v1 (not v1alpha1) — source code uses dashboard.opendatahub.io/v1"
+  - "CRITICAL: opendatahub.io/disabled must be set as a string annotation (not a spec field)"
+  - "never use hardware profiles for CPU/memory limits — those are set per workbench at creation time"
+  - "never create hardware profiles in a user project namespace — they must be in the ODH namespace"
+  - "never omit opendatahub.io/modified-date annotation — dashboard uses it to detect changes"
+
+rollback_order:
+  - "oc delete {{ hardware_profile_resource }} {{ profile_name }} -n {{ odh_namespace }}"

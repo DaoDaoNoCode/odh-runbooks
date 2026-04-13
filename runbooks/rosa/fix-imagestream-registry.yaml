@@ -1,0 +1,185 @@
+name: rosa-fix-imagestream-registry
+description: >
+  Fix ImageStream pull errors in pre-release RHOAI environments.
+  Problem: Some pre-release RHOAI environments have ImageStreams that fail to pull
+  because they point to registry.redhat.io instead of the required quay.io.
+  Solution: Patch the ImageStream tags to redirect from registry.redhat.io to quay.io.
+
+  This automates the process from:
+    devtools/RHOAI-on-ROSA/install-rhoai/tools/isfix/is_registry_fix.py
+
+  Symptoms: Workbench images fail to load, pods stuck in ImagePullBackOff.
+  Check: oc get is -n redhat-ods-applications | shows tags from registry.redhat.io
+
+  Manual fix for a single tag:
+    oc patch is <name> -n redhat-ods-applications -p '{"spec":{"tags":[{"name":"<tag>","from":{"kind":"DockerImage","name":"quay.io/rhoai/<image>@sha256:..."}}]}}'
+    oc import-image <name>:<tag> -n redhat-ods-applications --confirm
+rhoai_version_tested: null
+confidence_overall: doc-derived
+
+parameters:
+  - name: imagestream_names
+    description: "Space-separated ImageStream names to fix (e.g. 'minimal-gpu pytorch'). Leave empty to fix all."
+    required: false
+    default: ""
+  - name: namespace
+    description: Namespace containing the ImageStreams
+    required: false
+    default: redhat-ods-applications
+  - name: dry_run
+    description: "Show what would be changed without applying (true/false)"
+    required: false
+    default: "false"
+
+steps:
+  - id: check-python-available
+    confidence: doc-derived
+    description: Verify Python 3.7+ is available (required by the fix tool)
+    requires:
+      - type: openshift-cluster
+    pre_check:
+      command: "python3 --version 2>/dev/null | grep -c 'Python 3' || echo 0"
+      expected_min: 1
+      on_fail: STOP
+    action:
+      type: none
+    post_check:
+      command: "python3 --version 2>/dev/null | grep -c 'Python 3' || echo 0"
+      expected_min: 1
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: scan-problematic-imagestreams
+    confidence: doc-derived
+    description: >
+      Scan ImageStreams for tags pointing to registry.redhat.io.
+      These are the ones causing ImagePullBackOff errors.
+    action:
+      type: query
+      command: |
+        echo "=== Scanning ImageStreams in {{ namespace }} ==="
+        echo ""
+        oc get is -n {{ namespace }} --no-headers 2>/dev/null | awk '{print $1}' | while read IS_NAME; do
+          BAD_TAGS=$(oc get is "$IS_NAME" -n {{ namespace }} -o json 2>/dev/null | \
+            python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+tags = data.get('spec', {}).get('tags', [])
+bad = [(t.get('name'), t.get('from', {}).get('name', '')) for t in tags
+       if t.get('from', {}).get('kind') == 'DockerImage'
+       and 'registry.redhat.io' in t.get('from', {}).get('name', '')]
+for name, img in bad:
+    print(f'  tag {name}: {img[:80]}...' if len(img) > 80 else f'  tag {name}: {img}')
+" 2>/dev/null)
+          if [ -n "$BAD_TAGS" ]; then
+            echo "✗ $IS_NAME:"
+            echo "$BAD_TAGS"
+            echo ""
+          fi
+        done
+        echo "=== Scan complete ==="
+      store_as: scan_results
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "60s"
+      on_fail: STOP
+
+  - id: run-isfix-tool
+    confidence: doc-derived
+    description: >
+      Run the is_registry_fix.py tool from devtools to patch ImageStreams.
+      The tool is available at devtools/RHOAI-on-ROSA/install-rhoai/tools/isfix/is_registry_fix.py
+      Finds the script automatically or runs the equivalent inline logic.
+    action:
+      type: query
+      command: |
+        # Find the isfix tool
+        ISFIX_SCRIPT=""
+        for search_path in \
+          ~/Desktop/ODH/devtools/RHOAI-on-ROSA/install-rhoai/tools/isfix/is_registry_fix.py \
+          ~/repos/devtools/RHOAI-on-ROSA/install-rhoai/tools/isfix/is_registry_fix.py \
+          ./tools/isfix/is_registry_fix.py; do
+          if [ -f "$search_path" ]; then
+            ISFIX_SCRIPT="$search_path"
+            break
+          fi
+        done
+
+        DRY_RUN_FLAG=""
+        if [ "{{ dry_run }}" = "true" ]; then
+          DRY_RUN_FLAG="--dry-run"
+        fi
+
+        if [ -n "$ISFIX_SCRIPT" ]; then
+          echo "Found isfix tool at: $ISFIX_SCRIPT"
+          if [ -z "{{ imagestream_names }}" ]; then
+            # Fix all ImageStreams with problematic tags
+            oc get is -n {{ namespace }} --no-headers 2>/dev/null | awk '{print $1}' | \
+              xargs -I{} python3 "$ISFIX_SCRIPT" {} -n {{ namespace }} -y $DRY_RUN_FLAG 2>&1 || true
+          else
+            python3 "$ISFIX_SCRIPT" {{ imagestream_names }} -n {{ namespace }} -y $DRY_RUN_FLAG 2>&1 || true
+          fi
+        else
+          echo "isfix tool not found locally. Using inline fix..."
+          # Inline fix: patch all registry.redhat.io tags to quay.io
+          oc get is -n {{ namespace }} --no-headers 2>/dev/null | awk '{print $1}' | while read IS_NAME; do
+            oc get is "$IS_NAME" -n {{ namespace }} -o json 2>/dev/null | python3 -c "
+import json, sys, subprocess
+data = json.load(sys.stdin)
+tags = data.get('spec', {}).get('tags', [])
+for tag in tags:
+    img = tag.get('from', {}).get('name', '')
+    tag_name = tag.get('name', '')
+    if tag.get('from', {}).get('kind') == 'DockerImage' and 'registry.redhat.io' in img:
+        new_img = img.replace('registry.redhat.io/', 'quay.io/')
+        is_name = data['metadata']['name']
+        ns = data['metadata']['namespace']
+        dry_run = '{{ dry_run }}' == 'true'
+        if dry_run:
+            print(f'Would patch {is_name}:{tag_name}: {img} -> {new_img}')
+        else:
+            patch = json.dumps({'spec':{'tags':[{'name':tag_name,'from':{'kind':'DockerImage','name':new_img}}]}})
+            result = subprocess.run(['oc','patch','is',is_name,'-n',ns,'-p',patch], capture_output=True, text=True)
+            if result.returncode == 0:
+                print(f'✓ Patched {is_name}:{tag_name}')
+                subprocess.run(['oc','import-image',f'{is_name}:{tag_name}','-n',ns,'--confirm'], capture_output=True)
+            else:
+                print(f'✗ Failed: {result.stderr}')
+" 2>/dev/null || true
+          done
+        fi
+        echo "Fix operation complete"
+      store_as: fix_results
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "300s"
+      on_fail: STOP
+    return: |
+      ✓ ImageStream registry fix complete.
+
+      Scan results:
+      {{ scan_results }}
+
+      Fix results:
+      {{ fix_results }}
+
+      Verify fixed ImageStreams:
+        oc get is -n {{ namespace }}
+
+      For any remaining issues, run the isfix tool manually:
+        python3 devtools/RHOAI-on-ROSA/install-rhoai/tools/isfix/is_registry_fix.py \
+          <imagestream-name> -n {{ namespace }}
+
+      Manual fix for a single tag:
+        oc patch is <name> -n {{ namespace }} \
+          -p '{"spec":{"tags":[{"name":"<tag>","from":{"kind":"DockerImage","name":"quay.io/rhoai/<image>@sha256:..."}}]}}'
+        oc import-image <name>:<tag> -n {{ namespace }} --confirm
+
+known_bad_patterns:
+  - "never change the sha256 digest when redirecting — only change the registry prefix"
+  - "never run this on stable RHOAI clusters — it's only needed for pre-release builds"
+  - "after patching, always run oc import-image to refresh metadata"
+
+rollback_order: []

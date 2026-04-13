@@ -1,0 +1,240 @@
+name: gpu-install-gpu-operator
+description: >
+  Install the NVIDIA GPU Operator on OpenShift via OLM.
+  The GPU Operator manages: NVIDIA drivers, device plugin, container toolkit,
+  DCGM exporter, and node feature discovery (NFD).
+  Required before any GPU workloads (workbenches, model serving, training).
+rhoai_version_tested: null
+confidence_overall: inferred
+
+parameters:
+  - name: gpu_operator_channel
+    description: OLM channel for GPU Operator (check OperatorHub for latest)
+    required: false
+    default: v24.9
+
+steps:
+  - id: check-gpu-nodes-exist
+    confidence: doc-derived
+    description: Verify GPU nodes are present in the cluster before installing operator
+    requires:
+      - type: gpu-available
+        can_auto_resolve: false
+        blocker_message: >
+          GPU nodes must exist before installing the GPU Operator.
+          Add GPU nodes first: odh run gpu/add-gpu-node-ocm
+      - type: storage-class
+    pre_check:
+      command: "oc get nodes -l nvidia.com/gpu.present=true --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      on_fail: STOP
+    action:
+      type: none
+    post_check:
+      command: "oc get nodes --no-headers | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: install-nfd-operator
+    confidence: inferred
+    description: Install Node Feature Discovery operator (required by GPU Operator)
+    pre_check:
+      command: "oc get subscription nfd -n openshift-nfd --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: openshift-nfd
+        ---
+        apiVersion: operators.coreos.com/v1
+        kind: OperatorGroup
+        metadata:
+          name: nfd-operatorgroup
+          namespace: openshift-nfd
+        spec:
+          targetNamespaces:
+            - openshift-nfd
+        ---
+        apiVersion: operators.coreos.com/v1alpha1
+        kind: Subscription
+        metadata:
+          name: nfd
+          namespace: openshift-nfd
+        spec:
+          channel: stable
+          installPlanApproval: Automatic
+          name: nfd
+          source: redhat-operators
+          sourceNamespace: openshift-marketplace
+    post_check:
+      command: "oc get csv -n openshift-nfd -l operators.coreos.com/nfd.openshift-nfd= -o jsonpath='{.items[0].status.phase}' 2>/dev/null"
+      expected: "Succeeded"
+      timeout: "300s"
+      poll_interval: "15s"
+      on_fail: STOP
+
+  - id: create-nfd-instance
+    confidence: inferred
+    description: Create NodeFeatureDiscovery CR to start detecting hardware
+    pre_check:
+      command: "oc get nodefeaturediscovery -n openshift-nfd --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: nfd.openshift.io/v1
+        kind: NodeFeatureDiscovery
+        metadata:
+          name: nfd-instance
+          namespace: openshift-nfd
+        spec:
+          operand:
+            image: registry.redhat.io/openshift4/ose-node-feature-discovery:v4.14
+            servicePort: 12000
+          workerConfig:
+            configData: |
+              core:
+                sleepInterval: 60s
+    post_check:
+      command: "oc get nodefeaturediscovery nfd-instance -n openshift-nfd -o jsonpath='{.status.conditions[?(@.type==\"Available\")].status}' 2>/dev/null"
+      expected: "True"
+      timeout: "300s"
+      poll_interval: "20s"
+      on_fail: STOP
+
+  - id: install-gpu-operator
+    confidence: inferred
+    description: Install NVIDIA GPU Operator via OLM
+    pre_check:
+      command: "oc get subscription gpu-operator-certified -n nvidia-gpu-operator --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: nvidia-gpu-operator
+          labels:
+            openshift.io/cluster-monitoring: "true"
+        ---
+        apiVersion: operators.coreos.com/v1
+        kind: OperatorGroup
+        metadata:
+          name: nvidia-gpu-operator-group
+          namespace: nvidia-gpu-operator
+        spec:
+          targetNamespaces:
+            - nvidia-gpu-operator
+        ---
+        apiVersion: operators.coreos.com/v1alpha1
+        kind: Subscription
+        metadata:
+          name: gpu-operator-certified
+          namespace: nvidia-gpu-operator
+        spec:
+          channel: "{{ gpu_operator_channel }}"
+          installPlanApproval: Automatic
+          name: gpu-operator-certified
+          source: certified-operators
+          sourceNamespace: openshift-marketplace
+    post_check:
+      command: "oc get csv -n nvidia-gpu-operator -l operators.coreos.com/gpu-operator-certified.nvidia-gpu-operator= -o jsonpath='{.items[0].status.phase}' 2>/dev/null"
+      expected: "Succeeded"
+      timeout: "600s"
+      poll_interval: "20s"
+      on_fail: STOP
+
+  - id: create-cluster-policy
+    confidence: inferred
+    description: Create ClusterPolicy to deploy GPU driver and device plugin on GPU nodes
+    pre_check:
+      command: "oc get clusterpolicy gpu-cluster-policy -n nvidia-gpu-operator --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: nvidia.com/v1
+        kind: ClusterPolicy
+        metadata:
+          name: gpu-cluster-policy
+          namespace: nvidia-gpu-operator
+        spec:
+          operator:
+            defaultRuntime: crio
+          driver:
+            enabled: true
+          toolkit:
+            enabled: true
+          devicePlugin:
+            enabled: true
+          dcgm:
+            enabled: true
+          dcgmExporter:
+            enabled: true
+          gfd:
+            enabled: true
+          migManager:
+            enabled: false
+          nodeStatusExporter:
+            enabled: true
+          validator:
+            plugin:
+              env:
+                - name: WITH_WORKLOAD
+                  value: "true"
+    post_check:
+      command: "oc get clusterpolicy gpu-cluster-policy -n nvidia-gpu-operator -o jsonpath='{.status.state}' 2>/dev/null"
+      expected: "ready"
+      timeout: "900s"
+      poll_interval: "30s"
+      on_fail: STOP
+
+  - id: verify-gpu-allocatable
+    confidence: doc-derived
+    description: Verify GPU nodes show nvidia.com/gpu as allocatable
+    action:
+      type: query
+      command: "oc get nodes -o jsonpath='{.items[*].status.allocatable.nvidia\\.com/gpu}' | tr ' ' '\\n' | grep -v '^0$' | grep -v '^$' | wc -l | tr -d ' '"
+      store_as: gpu_node_count
+    post_check:
+      command: "oc get nodes -o jsonpath='{.items[*].status.allocatable.nvidia\\.com/gpu}' | tr ' ' '\\n' | grep -v '^0$' | grep -v '^$' | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "60s"
+      on_fail: STOP
+    return: |
+      ✓ NVIDIA GPU Operator installed.
+
+      GPU nodes available: {{ gpu_node_count }}
+
+      Next steps:
+        - Create GPU workbench: odh run workbenches/create-workbench-gpu
+        - Deploy LLM: odh run model-serving/deploy-vllm-model
+
+known_bad_patterns:
+  - "never install the GPU Operator without first installing NFD — the operator will not know which nodes have GPUs"
+  - "never install GPU Operator on a cluster with no GPU nodes — the ClusterPolicy will stay in 'notReady' forever"
+  - "never manually install NVIDIA drivers on nodes — the GPU Operator manages them and manual installs conflict"
+  - "never use the 'stable' channel for GPU Operator on OpenShift — use the versioned channel (v24.x)"
+
+rollback_order:
+  - "oc delete clusterpolicy gpu-cluster-policy -n nvidia-gpu-operator"
+  - "oc delete subscription gpu-operator-certified -n nvidia-gpu-operator"
+  - "oc delete namespace nvidia-gpu-operator"
+  - "oc delete nodefeaturediscovery nfd-instance -n openshift-nfd"

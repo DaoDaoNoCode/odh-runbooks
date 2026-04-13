@@ -1,0 +1,72 @@
+name: cluster-enable-pipelines
+description: >
+  Enable Data Science Pipelines (DSP) in the DataScienceCluster.
+  DSP uses Kubeflow Pipelines + Argo Workflows, deployed per-project namespace
+  for tenant isolation. After enabling, users create a pipeline server per project.
+rhoai_version_tested: null
+confidence_overall: doc-derived
+
+parameters: []
+
+steps:
+  - id: enable-dsp
+    confidence: doc-derived
+    description: Enable DataSciencePipelines component in DataScienceCluster
+    requires:
+      - type: dsc-exists
+    pre_check:
+      command: "oc get dsc -o jsonpath='{.items[0].spec.components.datasciencepipelines.managementState}'"
+      expected: "Managed"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: patch
+      target: "$(oc get dsc -o name | head -1)"
+      patch: '{"spec":{"components":{"datasciencepipelines":{"managementState":"Managed"}}}}'
+      dry_run: false
+    post_check:
+      command: "oc get dsc -o jsonpath='{.items[0].spec.components.datasciencepipelines.managementState}'"
+      expected: "Managed"
+      timeout: "30s"
+      on_fail: STOP
+
+  - id: wait-dsp-operator-ready
+    confidence: doc-derived
+    description: Wait for DataScienceCluster to finish reconciling DSP component
+    action:
+      type: wait
+      command: "oc wait dsc --all --for=condition=Ready --timeout=300s 2>/dev/null || sleep 10"
+    post_check:
+      command: "oc get crd datasciencepipelinesapplications.datasciencepipelinesapplications.opendatahub.io --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "300s"
+      poll_interval: "15s"
+      on_fail: STOP
+
+  - id: verify-dspa-crd
+    confidence: doc-derived
+    description: Verify DataSciencePipelinesApplication CRD is installed
+    action:
+      type: query
+      command: "oc get crd datasciencepipelinesapplications.datasciencepipelinesapplications.opendatahub.io --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      store_as: crd_count
+    post_check:
+      command: "oc get crd datasciencepipelinesapplications.datasciencepipelinesapplications.opendatahub.io --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "30s"
+      on_fail: STOP
+    return: |
+      ✓ Data Science Pipelines enabled.
+
+      CRD: datasciencepipelinesapplications.opendatahub.io/v1alpha1
+      Note: Each project needs its own pipeline server (DSPA CR).
+
+      Next step: odh run pipelines/create-pipeline-server -p project_namespace=<ns> -p ...
+
+known_bad_patterns:
+  - "never create a DSPA without an S3 bucket configured — the pipeline server will fail to start"
+  - "never share one DSPA across multiple projects — each project must have its own"
+  - "never use the same S3 bucket for multiple DSPA instances without different prefixes"
+
+rollback_order:
+  - "oc patch $(oc get dsc -o name | head -1) --type merge -p '{\"spec\":{\"components\":{\"datasciencepipelines\":{\"managementState\":\"Removed\"}}}}'"

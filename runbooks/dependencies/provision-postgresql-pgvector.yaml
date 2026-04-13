@@ -1,0 +1,236 @@
+name: dependencies-provision-postgresql-pgvector
+description: >
+  Install PostgreSQL with pgvector extension on OpenShift using Crunchy Data PGO operator.
+  Required for: LlamaStack RAG workflows, Langfuse, EvalHub (database backend), and any app
+  needing vector search on OpenShift.
+
+  Source: devtools/Summit-on-ROSA/postgreSQL/install-postgresql-pgvector.sh
+
+  Uses Crunchy Data PostgreSQL Operator (PGO) from OperatorHub.
+  Auto-generates a strong password stored in a Kubernetes Secret.
+  Enables pgvector extension automatically via init SQL ConfigMap.
+rhoai_version_tested: null
+confidence_overall: doc-derived
+
+parameters:
+  - name: namespace
+    description: OpenShift project for the PostgreSQL cluster
+    required: false
+    default: pgvector
+  - name: pg_cluster_name
+    description: Name of the PostgresCluster custom resource
+    required: false
+    default: pgvector
+  - name: pg_database
+    description: Database name to create
+    required: false
+    default: vectordb
+  - name: pg_username
+    description: PostgreSQL username
+    required: false
+    default: pgadmin
+  - name: pg_storage_size
+    description: Persistent volume size for data
+    required: false
+    default: "10Gi"
+  - name: pg_version
+    description: PostgreSQL major version
+    required: false
+    default: "16"
+
+steps:
+  - id: install-pgo-operator
+    confidence: doc-derived
+    description: >
+      Install Crunchy Data PostgreSQL Operator (PGO) from OperatorHub.
+      Searches openshift-operators and postgres-operator namespaces.
+    requires:
+      - type: openshift-cluster
+    pre_check:
+      command: "oc get subscription crunchy-postgres-operator --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: operators.coreos.com/v1alpha1
+        kind: Subscription
+        metadata:
+          name: crunchy-postgres-operator
+          namespace: openshift-operators
+        spec:
+          channel: v5
+          installPlanApproval: Automatic
+          name: crunchy-postgres-operator
+          source: certified-operators
+          sourceNamespace: openshift-marketplace
+    post_check:
+      command: "oc get csv -n openshift-operators --no-headers 2>/dev/null | grep -i 'crunchy\|postgres' | grep -c Succeeded || echo 0"
+      expected_min: 1
+      timeout: "300s"
+      poll_interval: "15s"
+      on_fail: STOP
+
+  - id: create-namespace
+    confidence: doc-derived
+    description: Create project namespace for PostgreSQL
+    pre_check:
+      command: "oc get namespace {{ namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: {{ namespace }}
+    post_check:
+      command: "oc get namespace {{ namespace }} -o jsonpath='{.status.phase}'"
+      expected: "Active"
+      timeout: "30s"
+      on_fail: STOP
+
+  - id: create-init-sql-configmap
+    confidence: doc-derived
+    description: >
+      Create ConfigMap with init SQL to enable pgvector extension automatically on startup.
+      The script/devtools approach: init SQL enables the vector extension in the target database.
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: pgvector-init-sql
+          namespace: {{ namespace }}
+        data:
+          init.sql: |
+            CREATE EXTENSION IF NOT EXISTS vector;
+            SELECT extname, extversion FROM pg_extension WHERE extname = 'vector';
+    post_check:
+      command: "oc get configmap pgvector-init-sql -n {{ namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "15s"
+      on_fail: STOP
+
+  - id: create-postgres-cluster
+    confidence: doc-derived
+    description: >
+      Deploy PostgresCluster CR with pgvector extension enabled.
+      PGO auto-generates the password stored in: {{ pg_cluster_name }}-pguser-{{ pg_username }} secret.
+    pre_check:
+      command: "oc get postgrescluster {{ pg_cluster_name }} -n {{ namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: postgres-operator.crunchydata.com/v1beta1
+        kind: PostgresCluster
+        metadata:
+          name: {{ pg_cluster_name }}
+          namespace: {{ namespace }}
+        spec:
+          image: registry.developers.crunchydata.com/crunchydata/crunchy-postgres:ubi8-{{ pg_version }}.5-0
+          postgresVersion: {{ pg_version }}
+          instances:
+            - name: instance1
+              dataVolumeClaimSpec:
+                accessModes:
+                  - ReadWriteOnce
+                resources:
+                  requests:
+                    storage: {{ pg_storage_size }}
+          backups:
+            pgbackrest:
+              image: registry.developers.crunchydata.com/crunchydata/crunchy-pgbackrest:ubi8-2.47-2
+              repos:
+                - name: repo1
+                  volume:
+                    volumeClaimSpec:
+                      accessModes:
+                        - ReadWriteOnce
+                      resources:
+                        requests:
+                          storage: 1Gi
+          users:
+            - name: {{ pg_username }}
+              databases:
+                - {{ pg_database }}
+              options: "SUPERUSER"
+          databaseInitSQL:
+            name: pgvector-init-sql
+            key: init.sql
+          patroni:
+            dynamicConfiguration:
+              postgresql:
+                shared_preload_libraries:
+                  - vectors.so
+    post_check:
+      command: "oc get postgrescluster {{ pg_cluster_name }} -n {{ namespace }} -o jsonpath='{.status.conditions[?(@.type==\"ProxyAvailable\")].status}' 2>/dev/null"
+      expected: "True"
+      timeout: "600s"
+      poll_interval: "20s"
+      on_fail: STOP
+    rollback: "oc delete postgrescluster {{ pg_cluster_name }} -n {{ namespace }} 2>/dev/null || true"
+
+  - id: get-connection-details
+    confidence: doc-derived
+    description: >
+      Retrieve auto-generated password from PGO secret.
+      Secret name pattern: {{ pg_cluster_name }}-pguser-{{ pg_username }}
+    action:
+      type: query
+      command: |
+        SECRET_NAME="{{ pg_cluster_name }}-pguser-{{ pg_username }}"
+        PG_PASSWORD=$(oc get secret "$SECRET_NAME" -n {{ namespace }} \
+          -o jsonpath='{.data.password}' 2>/dev/null | base64 -d)
+        PG_HOST="{{ pg_cluster_name }}-primary.{{ namespace }}.svc"
+        echo "host=$PG_HOST|port=5432|db={{ pg_database }}|user={{ pg_username }}|pass=$PG_PASSWORD"
+      store_as: pg_connection_raw
+    post_check:
+      assert: pg_connection_raw is not empty
+      command: "echo ok"
+      expected: "ok"
+      timeout: "15s"
+      on_fail: STOP
+    return: |
+      ✓ PostgreSQL + pgvector deployed.
+
+      Namespace:  {{ namespace }}
+      Cluster:    {{ pg_cluster_name }}
+      Database:   {{ pg_database }}
+      Username:   {{ pg_username }}
+      Connection: {{ pg_connection_raw }}
+
+      Get password anytime:
+        oc get secret {{ pg_cluster_name }}-pguser-{{ pg_username }} \
+          -n {{ namespace }} -o jsonpath='{.data.password}' | base64 -d
+
+      Internal host (for pods in cluster):
+        {{ pg_cluster_name }}-primary.{{ namespace }}.svc:5432
+
+      Python connection string:
+        postgresql://{{ pg_username }}:<password>@{{ pg_cluster_name }}-primary.{{ namespace }}.svc:5432/{{ pg_database }}
+
+      Verify pgvector:
+        oc exec -n {{ namespace }} deploy/{{ pg_cluster_name }}-instance1 -- \
+          psql -U {{ pg_username }} -d {{ pg_database }} -c "SELECT extname, extversion FROM pg_extension WHERE extname='vector';"
+
+known_bad_patterns:
+  - "never hardcode the password — PGO auto-generates it and stores it in the secret"
+  - "never use the pgvector-init-sql ConfigMap for sensitive data — it's only for DDL statements"
+  - "never delete the PostgresCluster without backing up data first"
+
+rollback_order:
+  - "oc delete postgrescluster {{ pg_cluster_name }} -n {{ namespace }} 2>/dev/null || true"
+  - "oc delete configmap pgvector-init-sql -n {{ namespace }} 2>/dev/null || true"
+  - "oc delete namespace {{ namespace }} 2>/dev/null || true"

@@ -1,0 +1,156 @@
+name: model-registry-deploy-from-registry
+description: >
+  Deploy a model from the Model Registry to KServe InferenceService.
+  Looks up the model artifact URI from the registry and deploys it.
+  This is the "correct user flow" — register first, then deploy from registry.
+rhoai_version_tested: null
+confidence_overall: inferred
+
+parameters:
+  - name: registry_name
+    description: Model registry instance name
+    required: false
+    default: model-registry
+  - name: registry_namespace
+    description: Model registry namespace
+    required: false
+    default: odh-model-registries
+  - name: model_version_id
+    description: Model version ID from the registry (from register-model output)
+    required: true
+  - name: project_namespace
+    description: Target project namespace to deploy into
+    required: true
+  - name: inference_service_name
+    description: Name for the InferenceService
+    required: true
+  - name: s3_connection_name
+    description: S3 connection secret in the target project
+    required: true
+
+steps:
+  - id: get-registry-token
+    confidence: inferred
+    description: Get auth token for registry API
+    requires:
+      - type: model-registry-instance
+      - type: kserve-enabled
+      - type: namespace
+        name: "{{ project_namespace }}"
+      - type: s3-connection
+        namespace: "{{ project_namespace }}"
+    action:
+      type: query
+      command: "oc whoami -t"
+      store_as: oc_token
+    post_check:
+      assert: oc_token is not empty
+      command: "oc whoami -t"
+      expected_min: 1
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: get-registry-url
+    confidence: inferred
+    description: Get model registry REST API URL
+    action:
+      type: query
+      command: "oc get route {{ registry_name }}-rest -n {{ registry_namespace }} -o jsonpath='{.spec.host}' 2>/dev/null"
+      store_as: registry_host
+    post_check:
+      assert: registry_host is not empty
+      command: "oc get route {{ registry_name }}-rest -n {{ registry_namespace }} -o jsonpath='{.spec.host}'"
+      expected_min: 1
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: fetch-model-version
+    confidence: inferred
+    description: Fetch model version metadata from registry
+    action:
+      type: api_call
+      method: GET
+      url: "https://{{ registry_host }}/api/model_registry/v1alpha3/model_versions/{{ model_version_id }}"
+      headers:
+        Authorization: "Bearer {{ oc_token }}"
+      store_response_as: model_version
+    post_check:
+      assert: model_version is not empty
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: fetch-model-artifact
+    confidence: inferred
+    description: Fetch artifact to get model storage URI
+    action:
+      type: api_call
+      method: GET
+      url: "https://{{ registry_host }}/api/model_registry/v1alpha3/model_versions/{{ model_version_id }}/artifacts"
+      headers:
+        Authorization: "Bearer {{ oc_token }}"
+      store_response_as: artifacts_response
+    post_check:
+      assert: artifacts_response is not empty
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: deploy-inference-service
+    confidence: inferred
+    description: Create InferenceService using URI from model registry
+    pre_check:
+      command: "oc get inferenceservice {{ inference_service_name }} -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: serving.kserve.io/v1beta1
+        kind: InferenceService
+        metadata:
+          name: {{ inference_service_name }}
+          namespace: {{ project_namespace }}
+          labels:
+            opendatahub.io/dashboard: "true"
+          annotations:
+            serving.kserve.io/deploymentMode: RawDeployment
+            openshift.io/display-name: "{{ inference_service_name }}"
+            model-registry/model-version-id: "{{ model_version_id }}"
+            model-registry/registered-model-id: "{{ model_version.registeredModelId }}"
+        spec:
+          predictor:
+            minReplicas: 1
+            model:
+              modelFormat:
+                name: vllm
+              storage:
+                key: {{ s3_connection_name }}
+                path: "{{ artifacts_response.items[0].uri }}"
+    post_check:
+      command: "oc get inferenceservice {{ inference_service_name }} -n {{ project_namespace }} -o jsonpath='{.status.modelStatus.states.activeModelState}'"
+      expected: "Loaded"
+      timeout: "600s"
+      poll_interval: "20s"
+      on_fail: STOP
+    rollback: "oc delete inferenceservice {{ inference_service_name }} -n {{ project_namespace }}"
+    return: |
+      ✓ Model deployed from registry.
+
+      Registry model version: {{ model_version_id }}
+      InferenceService: {{ inference_service_name }}
+      Project: {{ project_namespace }}
+
+      Dashboard: Projects → {{ project_namespace }} → Models and model servers
+      Model Registry: model-registry/{{ model_version.registeredModelId }} shows this deployment
+
+known_bad_patterns:
+  - "never hardcode model URIs in InferenceService — always fetch from registry so the registry stays the source of truth"
+  - "never deploy without the model-registry/* annotations — the dashboard uses them to link model registry → deployment"
+
+rollback_order:
+  - "oc delete inferenceservice {{ inference_service_name }} -n {{ project_namespace }}"

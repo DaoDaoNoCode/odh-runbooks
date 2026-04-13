@@ -1,0 +1,122 @@
+name: projects-create-project
+description: >
+  Create a new Data Science Project (OpenShift namespace with ODH labels).
+  Matches EXACTLY what the dashboard backend creates (namespaceUtils.ts, DSG_CREATION case):
+  - Label: opendatahub.io/dashboard=true (REQUIRED — dashboard filters by this)
+  - Label: kueue.openshift.io/managed=true (added if Kueue is enabled in cluster)
+  - Annotation: openshift.io/display-name (REQUIRED for readable project name)
+  - Annotation: openshift.io/description (REQUIRED, empty string if not provided)
+  Note: The dashboard actually calls /api/namespaces/{name}/0 backend endpoint which applies
+  labels server-side. Our runbook applies them directly via kubectl which has the same effect.
+rhoai_version_tested: null
+confidence_overall: doc-derived
+
+parameters:
+  - name: project_name
+    description: Name of the project (lowercase, hyphens only, max 63 chars)
+    required: true
+  - name: display_name
+    description: Human-readable display name shown in the dashboard
+    required: false
+    default: "{{ project_name }}"
+  - name: description
+    description: Project description
+    required: false
+    default: ""
+
+steps:
+  - id: validate-name
+    confidence: doc-derived
+    description: Check project doesn't already exist
+    requires:
+      - type: openshift-cluster
+    pre_check:
+      command: "oc get namespace {{ project_name }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: none
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "5s"
+      on_fail: STOP
+
+  - id: check-kueue-enabled
+    confidence: inferred
+    description: Check if Kueue is enabled (to add kueue.openshift.io/managed label)
+    action:
+      type: query
+      command: "oc get dsc -o jsonpath='{.items[0].spec.components.kueue.managementState}' 2>/dev/null"
+      store_as: kueue_state
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: create-namespace
+    confidence: doc-derived
+    description: >
+      Create namespace with EXACT labels and annotations that dashboard applies.
+      From namespaceUtils.ts DSG_CREATION case:
+        - opendatahub.io/dashboard=true always applied
+        - kueue.openshift.io/managed=true applied when Kueue NOT disabled
+        - openshift.io/display-name and description always set
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: {{ project_name }}
+          annotations:
+            openshift.io/display-name: "{{ display_name }}"
+            openshift.io/description: "{{ description }}"
+          labels:
+            opendatahub.io/dashboard: "true"
+            kueue.openshift.io/managed: "true"
+            kubernetes.io/metadata.name: {{ project_name }}
+    post_check:
+      command: "oc get namespace {{ project_name }} -o jsonpath='{.metadata.labels.opendatahub\\.io/dashboard}'"
+      expected: "true"
+      timeout: "30s"
+      on_fail: STOP
+    rollback: "oc delete namespace {{ project_name }}"
+
+  - id: wait-namespace-active
+    confidence: doc-derived
+    description: Wait for namespace to become Active
+    action:
+      type: wait
+      command: "oc wait namespace {{ project_name }} --for=jsonpath='{.status.phase}'=Active --timeout=60s"
+    post_check:
+      command: "oc get namespace {{ project_name }} -o jsonpath='{.status.phase}'"
+      expected: "Active"
+      timeout: "60s"
+      on_fail: STOP
+    return: |
+      ✓ Project created: {{ project_name }}
+
+      Display name: {{ display_name }}
+      Labels applied:
+        opendatahub.io/dashboard: "true"  ← required for dashboard listing
+        kueue.openshift.io/managed: "true" ← required for Kueue integration
+
+      Dashboard: Projects → {{ display_name }}
+
+      Next steps:
+        odh run workbenches/create-workbench -p project_namespace={{ project_name }}
+        odh run projects/create-s3-connection -p project_namespace={{ project_name }}
+        odh run pipelines/create-pipeline-server -p project_namespace={{ project_name }}
+
+known_bad_patterns:
+  - "CRITICAL: never omit opendatahub.io/dashboard=true — the dashboard's project list is filtered by this label"
+  - "never use uppercase letters or spaces in project_name — Kubernetes namespace names must be lowercase RFC 1123"
+  - "never create a project with the same name as an existing system namespace (openshift-*, kube-*, default) — the dashboard backend blocks these"
+  - "the openshift.io/display-name annotation is what users see in the dashboard — it can differ from the resource name"
+
+rollback_order:
+  - "oc delete namespace {{ project_name }}"

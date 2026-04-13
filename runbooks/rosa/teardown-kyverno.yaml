@@ -1,0 +1,97 @@
+name: rosa-teardown-kyverno
+description: >
+  Remove Kyverno from a ROSA-hosted cluster BEFORE deleting the cluster.
+
+  WHY THIS IS CRITICAL:
+  Bug ACM-12961: Kyverno's webhooks interfere with the ROSA cluster deletion process.
+  The hosted-klusterlet manifestwork deletion does not remove the manifestwork-cleanup
+  finalizer on the managedcluster CR when Kyverno webhooks are active.
+  This causes the cluster deletion to hang indefinitely.
+
+  HIBERNATION NOTE:
+  If the cluster needs to be hibernated and may fail to resume:
+  Scale down all Kyverno deployments BEFORE hibernating.
+  The failurePolicy: Ignore on ClusterPolicies mitigates but doesn't fully solve
+  the hibernation resume issue (nodes can't become Ready because Kyverno webhook
+  can't run because Kyverno pods aren't up yet — chicken-and-egg).
+
+  Run this runbook:
+    - Before: rosa delete cluster (REQUIRED)
+    - Before: hibernating the cluster (RECOMMENDED)
+rhoai_version_tested: null
+confidence_overall: doc-derived
+
+parameters:
+  - name: kyverno_version
+    description: Kyverno version that was installed
+    required: false
+    default: "v1.12.4"
+
+steps:
+  - id: delete-kyverno-policies
+    confidence: doc-derived
+    description: Delete all three Kyverno ClusterPolicies first to stop mutation webhooks
+    requires:
+      - type: openshift-cluster
+    action:
+      type: query
+      command: |
+        oc delete clusterpolicy sync-secrets 2>/dev/null || true
+        oc delete clusterpolicy add-imagepullsecrets 2>/dev/null || true
+        oc delete clusterpolicy replace-image-registry 2>/dev/null || true
+        echo "policies deleted"
+      store_as: policy_delete
+    post_check:
+      command: "oc get clusterpolicy 2>/dev/null | grep -E 'sync-secrets|add-imagepullsecrets|replace-image-registry' | wc -l | tr -d ' '"
+      expected: "0"
+      timeout: "30s"
+      on_fail: STOP
+
+  - id: delete-kyverno
+    confidence: doc-derived
+    description: >
+      Delete Kyverno itself using the same manifest used to install it.
+      This removes all Kyverno CRDs, deployments, webhooks, and RBAC.
+    action:
+      type: query
+      command: |
+        oc delete -f https://github.com/kyverno/kyverno/releases/download/{{ kyverno_version }}/install.yaml 2>/dev/null || true
+        echo "kyverno deletion submitted"
+      store_as: kyverno_delete
+    post_check:
+      command: "oc get namespace kyverno --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "0"
+      timeout: "120s"
+      poll_interval: "10s"
+      on_fail: STOP
+
+  - id: delete-pull-secret-brew
+    confidence: doc-derived
+    description: Clean up the pull-secret-brew from openshift-config
+    action:
+      type: query
+      command: "oc delete secret pull-secret-brew -n openshift-config 2>/dev/null || echo 'already gone'"
+      store_as: secret_delete
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "15s"
+      on_fail: STOP
+    return: |
+      ✓ Kyverno removed. Cluster is safe to delete.
+
+      Removed:
+        ✓ ClusterPolicy: sync-secrets
+        ✓ ClusterPolicy: add-imagepullsecrets
+        ✓ ClusterPolicy: replace-image-registry
+        ✓ Kyverno deployment and all resources
+        ✓ pull-secret-brew in openshift-config
+
+      You can now safely delete the cluster:
+        rosa delete cluster -c <cluster-name>
+
+known_bad_patterns:
+  - "CRITICAL: never skip this runbook before rosa delete cluster — Bug ACM-12961 will cause deletion to hang"
+  - "never delete just the ClusterPolicies without deleting Kyverno itself — the webhooks remain active and still interfere"
+
+rollback_order: []

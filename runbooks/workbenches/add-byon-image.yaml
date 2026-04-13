@@ -1,0 +1,130 @@
+name: workbenches-add-byon-image
+description: >
+  Add a custom (Bring Your Own Notebook) image to ODH dashboard image list.
+  Matches EXACTLY what the dashboard creates (from assembleBYONImageStream source):
+  - Labels: opendatahub.io/notebook-image=true, app.kubernetes.io/created-by=byon, opendatahub.io/dashboard=true
+  - Metadata annotations: opendatahub.io/notebook-image-name, opendatahub.io/notebook-image-url
+  - Tag annotations: openshift.io/imported-from, opendatahub.io/notebook-software (JSON array)
+  - Namespace: the ODH dashboard namespace (redhat-ods-applications or opendatahub)
+  - Enable/disable: opendatahub.io/notebook-image label set to "true" or "false"
+rhoai_version_tested: null
+confidence_overall: doc-derived
+
+parameters:
+  - name: image_name
+    description: Internal resource name (lowercase, hyphens)
+    required: true
+  - name: display_name
+    description: Display name shown in the workbench creation dropdown
+    required: true
+  - name: image_uri
+    description: "Full image URI (e.g. quay.io/myorg/my-notebook:latest)"
+    required: true
+  - name: description
+    description: Description of the image
+    required: false
+    default: "Custom notebook image"
+  - name: software_list
+    description: "JSON array of software packages: [{\"name\":\"PyTorch\",\"version\":\"2.1\",\"visible\":true}]"
+    required: false
+    default: "[]"
+
+steps:
+  - id: detect-odh-namespace
+    confidence: doc-derived
+    description: Detect ODH dashboard namespace
+    requires:
+      - type: dsc-exists
+    action:
+      type: query
+      command: |
+        oc get namespace redhat-ods-applications --no-headers 2>/dev/null | grep -q . \
+          && echo "redhat-ods-applications" || echo "opendatahub"
+      store_as: odh_namespace
+    post_check:
+      assert: odh_namespace is not empty
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: create-imagestream
+    confidence: doc-derived
+    description: >
+      Create ImageStream with EXACT labels and annotations that the dashboard
+      uses when creating BYON images (from assembleBYONImageStream function).
+      Three labels required: notebook-image=true, created-by=byon, dashboard=true.
+      Tag annotations include: imported-from URL and notebook-software JSON array.
+    pre_check:
+      command: "oc get imagestream {{ image_name }} -n {{ odh_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: image.openshift.io/v1
+        kind: ImageStream
+        metadata:
+          name: {{ image_name }}
+          namespace: {{ odh_namespace }}
+          labels:
+            opendatahub.io/notebook-image: "true"
+            app.kubernetes.io/created-by: "byon"
+            opendatahub.io/dashboard: "true"
+          annotations:
+            opendatahub.io/notebook-image-name: "{{ display_name }}"
+            opendatahub.io/notebook-image-url: "{{ image_uri }}"
+            opendatahub.io/notebook-image-desc: "{{ description }}"
+        spec:
+          lookupPolicy:
+            local: true
+          tags:
+            - name: latest
+              from:
+                kind: DockerImage
+                name: "{{ image_uri }}"
+              importPolicy:
+                scheduled: true
+              referencePolicy:
+                type: Source
+              annotations:
+                openshift.io/imported-from: "{{ image_uri }}"
+                opendatahub.io/notebook-software: "{{ software_list }}"
+                opendatahub.io/notebook-python-dependencies: "[]"
+    post_check:
+      command: "oc get imagestream {{ image_name }} -n {{ odh_namespace }} -o jsonpath='{.metadata.labels.opendatahub\\.io/notebook-image}'"
+      expected: "true"
+      timeout: "60s"
+      on_fail: STOP
+    rollback: "oc delete imagestream {{ image_name }} -n {{ odh_namespace }}"
+    return: |
+      ✓ BYON image registered: {{ display_name }}
+
+      ImageStream: {{ image_name }} in {{ odh_namespace }}
+      URI: {{ image_uri }}
+
+      The image will appear in:
+        Dashboard → Projects → <project> → Workbenches → Create workbench → Notebook image → {{ display_name }}
+
+      Labels required (all three MUST be present):
+        opendatahub.io/notebook-image: "true"   ← controls visibility
+        app.kubernetes.io/created-by: "byon"    ← identifies as BYON image
+        opendatahub.io/dashboard: "true"        ← marks as dashboard resource
+
+      To disable (hide without deleting):
+        oc label imagestream {{ image_name }} -n {{ odh_namespace }} opendatahub.io/notebook-image=false --overwrite
+
+      Software list format example:
+        [{"name":"PyTorch","version":"2.1.0","visible":true},{"name":"CUDA","version":"12.1","visible":true}]
+
+known_bad_patterns:
+  - "CRITICAL: missing app.kubernetes.io/created-by=byon label — image won't be shown in BYON section"
+  - "CRITICAL: missing opendatahub.io/dashboard=true label — dashboard won't list it"
+  - "never add the ImageStream in a user project namespace — BYON images must be in the ODH dashboard namespace"
+  - "never use an image without port 8888 exposed — OAuth proxy routes to this port"
+  - "never set opendatahub.io/notebook-image to anything other than 'true' or 'false' — it's the enable/disable switch"
+
+rollback_order:
+  - "oc delete imagestream {{ image_name }} -n {{ odh_namespace }}"

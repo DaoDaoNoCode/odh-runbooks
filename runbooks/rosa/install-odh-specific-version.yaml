@@ -1,0 +1,327 @@
+name: rosa-install-odh-specific-version
+description: >
+  Install a specific version of the Open Data Hub (ODH) operator on ROSA/OpenShift.
+  Uses the official ODH operator GitHub releases (not RHOAI/OperatorHub).
+  Source: devtools/ODH-on-ROSA/install-version.sh
+
+  Two installation methods:
+    direct (default): Clones the repo at the version tag, builds manifests with kustomize + make
+    olm:              Uses operator-sdk bundle to install via OLM
+
+  Prerequisites for 'direct' method: kustomize, make, gsed (macOS)
+  Prerequisites for 'olm' method: operator-sdk
+
+  Find available versions at:
+    https://github.com/opendatahub-io/opendatahub-operator/releases
+
+  Namespaces:
+    Operator: opendatahub-operator-system
+    Apps:     opendatahub (ODH) — different from RHOAI's redhat-ods-applications
+
+  The DSCInitialization uses: dscinitialization.opendatahub.io/v2
+rhoai_version_tested: null
+confidence_overall: doc-derived
+
+parameters:
+  - name: odh_version
+    description: "ODH GitHub release tag"
+    required: true
+    example: "v3.4.0-ea.1"
+    hint: "Find available versions at: https://github.com/opendatahub-io/opendatahub-operator/releases — use the exact tag name (e.g. v3.4.0-ea.1, v2.28.0)"
+    discover_cmd: "curl -sf 'https://api.github.com/repos/opendatahub-io/opendatahub-operator/releases?per_page=10' 2>/dev/null | python3 -c \"import json,sys; [print(r['tag_name']) for r in json.load(sys.stdin)]\" 2>/dev/null"
+  - name: install_method
+    description: "Installation method: direct | olm"
+    required: false
+    default: direct
+    enum: ["direct", "olm"]
+    hint: "direct requires: kustomize, make, gsed. olm requires: operator-sdk. Use 'direct' unless you specifically need OLM."
+  - name: operator_namespace
+    description: Namespace for the operator deployment
+    required: false
+    default: opendatahub-operator-system
+  - name: applications_namespace
+    description: Namespace for ODH applications
+    required: false
+    default: opendatahub
+  - name: create_dsc
+    description: Also create a DataScienceCluster with common components enabled
+    required: false
+    default: "false"
+
+steps:
+  - id: verify-prerequisites
+    confidence: doc-derived
+    description: >
+      Verify required tools are available.
+      Direct method needs: oc, kustomize, make, gsed (macOS).
+      OLM method needs: oc, operator-sdk.
+    requires:
+      - type: openshift-cluster
+    action:
+      type: query
+      command: |
+        echo "Checking prerequisites for {{ install_method }} method..."
+        command -v oc > /dev/null || { echo "ERROR: oc not found"; exit 1; }
+
+        if [ "{{ install_method }}" = "direct" ]; then
+          command -v kustomize > /dev/null || { echo "ERROR: kustomize not found. Install: brew install kustomize"; exit 1; }
+          command -v make > /dev/null || { echo "ERROR: make not found. Install: brew install make"; exit 1; }
+          # gsed required on macOS
+          if [ "$(uname)" = "Darwin" ]; then
+            command -v gsed > /dev/null || { echo "ERROR: gsed not found on macOS. Install: brew install gnu-sed"; exit 1; }
+          fi
+        elif [ "{{ install_method }}" = "olm" ]; then
+          command -v operator-sdk > /dev/null || { echo "ERROR: operator-sdk not found. See: https://sdk.operatorframework.io/docs/installation/"; exit 1; }
+        fi
+
+        echo "Prerequisites OK"
+      store_as: prereq_check
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "15s"
+      on_fail: STOP
+
+  - id: verify-version-exists
+    confidence: doc-derived
+    description: Verify the requested ODH version exists on GitHub
+    action:
+      type: query
+      command: |
+        if curl -sf "https://api.github.com/repos/opendatahub-io/opendatahub-operator/releases/tags/{{ odh_version }}" > /dev/null 2>&1; then
+          echo "found"
+        else
+          echo "ERROR: Version {{ odh_version }} not found at https://github.com/opendatahub-io/opendatahub-operator/releases"
+          exit 1
+        fi
+      store_as: version_check
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "30s"
+      on_fail: STOP
+
+  - id: create-operator-namespace
+    confidence: doc-derived
+    description: Create operator namespace with application namespace label
+    pre_check:
+      command: "oc get namespace {{ operator_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: {{ operator_namespace }}
+    post_check:
+      command: "oc get namespace {{ operator_namespace }} -o jsonpath='{.status.phase}'"
+      expected: "Active"
+      timeout: "30s"
+      on_fail: STOP
+
+  - id: create-applications-namespace
+    confidence: doc-derived
+    description: >
+      Create applications namespace and label it as the ODH application namespace.
+      Only ONE namespace can have opendatahub.io/application-namespace=true.
+    pre_check:
+      command: "oc get namespace {{ applications_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: {{ applications_namespace }}
+          labels:
+            opendatahub.io/application-namespace: "true"
+    post_check:
+      command: "oc get namespace {{ applications_namespace }} -o jsonpath='{.status.phase}'"
+      expected: "Active"
+      timeout: "30s"
+      on_fail: STOP
+
+  - id: install-odh-operator
+    confidence: doc-derived
+    description: >
+      Install ODH operator using the specified method.
+      Direct: clones GitHub release, runs make prepare, applies kustomize manifests.
+      OLM: uses operator-sdk bundle install.
+      This step runs the install-version.sh script logic.
+    action:
+      type: query
+      command: |
+        set -e
+        TEMP_DIR=$(mktemp -d)
+        trap "rm -rf $TEMP_DIR" EXIT
+
+        if [ "{{ install_method }}" = "olm" ]; then
+          echo "Installing via OLM..."
+          BUNDLE_IMG="quay.io/opendatahub/opendatahub-operator-bundle:{{ odh_version }}"
+          operator-sdk run bundle "$BUNDLE_IMG" \
+            --namespace {{ operator_namespace }} \
+            --decompression-image quay.io/project-codeflare/busybox:1.36
+        else
+          echo "Installing via direct method (kustomize)..."
+          git clone --depth 1 --branch {{ odh_version }} \
+            https://github.com/opendatahub-io/opendatahub-operator.git \
+            ${TEMP_DIR}/odh-operator
+          cd ${TEMP_DIR}/odh-operator
+          make prepare 2>&1 | grep -v "^go: downloading"
+          kustomize build config/default > ${TEMP_DIR}/manifests.yaml
+          oc apply -f ${TEMP_DIR}/manifests.yaml
+        fi
+        echo "Operator installation submitted"
+      store_as: install_result
+    post_check:
+      command: "oc get deployment opendatahub-operator-controller-manager -n {{ operator_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "600s"
+      poll_interval: "20s"
+      on_fail: STOP
+
+  - id: wait-operator-ready
+    confidence: doc-derived
+    description: Wait for ODH operator controller manager deployment to be Available
+    action:
+      type: wait
+      command: "oc wait --for=condition=Available --timeout=300s deployment/opendatahub-operator-controller-manager -n {{ operator_namespace }}"
+    post_check:
+      command: "oc get deployment opendatahub-operator-controller-manager -n {{ operator_namespace }} -o jsonpath='{.status.availableReplicas}' 2>/dev/null"
+      expected_min: 1
+      timeout: "300s"
+      poll_interval: "15s"
+      on_fail: STOP
+
+  - id: create-dsci
+    confidence: doc-derived
+    description: >
+      Create DSCInitialization resource.
+      Uses dscinitialization.opendatahub.io/v2 (confirmed from install-version.sh).
+      applicationsNamespace must match the labeled namespace.
+    pre_check:
+      command: "oc get dscinitialization default-dsci --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: dscinitialization.opendatahub.io/v2
+        kind: DSCInitialization
+        metadata:
+          name: default-dsci
+        spec:
+          applicationsNamespace: {{ applications_namespace }}
+          monitoring:
+            managementState: Managed
+            namespace: {{ applications_namespace }}
+          trustedCABundle:
+            managementState: Managed
+    post_check:
+      command: "oc get dscinitialization default-dsci -o jsonpath='{.status.conditions[?(@.type==\"Ready\")].status}' 2>/dev/null"
+      expected: "True"
+      timeout: "600s"
+      poll_interval: "20s"
+      on_fail: STOP
+
+  - id: create-dsc-optional
+    confidence: doc-derived
+    description: >
+      Optionally create a DataScienceCluster with common components.
+      Only runs if create_dsc=true. Skips otherwise.
+      Components enabled: dashboard, datasciencepipelines, workbenches, kserve, ray, trainingoperator, modelregistry.
+    pre_check:
+      command: "[ '{{ create_dsc }}' = 'true' ] && echo needed || echo skip"
+      expected: "needed"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: datasciencecluster.opendatahub.io/v1
+        kind: DataScienceCluster
+        metadata:
+          name: default-dsc
+        spec:
+          components:
+            dashboard:
+              managementState: Managed
+            datasciencepipelines:
+              managementState: Managed
+            workbenches:
+              managementState: Managed
+              workbenchNamespace: {{ applications_namespace }}
+            kserve:
+              managementState: Managed
+              rawDeploymentServiceConfig: Headed
+            ray:
+              managementState: Managed
+            trainingoperator:
+              managementState: Managed
+            modelregistry:
+              managementState: Managed
+              registriesNamespace: odh-model-registries
+            codeflare:
+              managementState: Removed
+            kueue:
+              managementState: Removed
+            modelmeshserving:
+              managementState: Removed
+            trustyai:
+              managementState: Removed
+            feastoperator:
+              managementState: Removed
+    post_check:
+      command: "oc get datasciencecluster default-dsc -o jsonpath='{.status.conditions[?(@.type==\"Ready\")].status}' 2>/dev/null"
+      expected: "True"
+      timeout: "900s"
+      poll_interval: "30s"
+      on_fail: STOP
+    return: |
+      ✓ ODH {{ odh_version }} installed.
+
+      Method:              {{ install_method }}
+      Operator namespace:  {{ operator_namespace }}
+      Apps namespace:      {{ applications_namespace }}
+      DSC created:         {{ create_dsc }}
+
+      Verify:
+        oc get pods -n {{ operator_namespace }}
+        oc get dscinitialization
+        oc get datasciencecluster
+
+      Find available versions:
+        curl -s https://api.github.com/repos/opendatahub-io/opendatahub-operator/releases | grep tag_name
+
+      To uninstall:
+        Run devtools/ODH-on-ROSA/uninstall-version.sh or:
+          oc delete datasciencecluster default-dsc
+          oc delete dscinitialization default-dsci
+          oc delete deployment opendatahub-operator-controller-manager -n {{ operator_namespace }}
+
+      Troubleshooting tip from README:
+        If "Operator Not Ready" immediately after ROSA cluster is ready,
+        wait ~5 minutes and retry — ROSA needs time to stabilize.
+
+known_bad_patterns:
+  - "never run this on a cluster that already has RHOAI installed — ODH and RHOAI cannot coexist"
+  - "never skip waiting for DSCI to be ready before creating DSC — the operator processes them sequentially"
+  - "on macOS, never use system sed — install gnu-sed (brew install gnu-sed) for the direct method"
+  - "if version not found: check https://github.com/opendatahub-io/opendatahub-operator/releases for valid tags"
+
+rollback_order:
+  - "oc delete datasciencecluster default-dsc 2>/dev/null || true"
+  - "oc delete dscinitialization default-dsci 2>/dev/null || true"
+  - "oc delete namespace {{ applications_namespace }} 2>/dev/null || true"
+  - "oc delete namespace {{ operator_namespace }} 2>/dev/null || true"

@@ -1,0 +1,155 @@
+name: trustyai-enable-service
+description: >
+  Deploy a TrustyAIService in a project to monitor deployed models for:
+  - Data drift (MeanShift, KSTest)
+  - Fairness metrics (Statistical Parity Difference, Disparate Impact)
+  - Explainability (LIME, SHAP, Counterfactuals, PDP)
+  TrustyAI collects inference data from KServe/ModelMesh models automatically.
+  Requires TrustyAI component enabled in DSC (enable-trustyai in cluster runbook).
+rhoai_version_tested: null
+confidence_overall: doc-derived
+
+parameters:
+  - name: project_namespace
+    description: Project namespace where models are deployed
+    required: true
+  - name: storage_type
+    description: "Storage backend: DATABASE | PVC"
+    required: false
+    default: PVC
+  - name: storage_size
+    description: Storage size for inference data
+    required: false
+    default: "10Gi"
+  - name: metrics_schedule
+    description: "How often to compute metrics (ISO-8601 duration: 5s, 1m, 5m)"
+    required: false
+    default: "5m"
+
+steps:
+  - id: check-trustyai-crd
+    confidence: doc-derived
+    description: Verify TrustyAI CRD is installed
+    requires:
+      - type: trustyai-enabled
+      - type: namespace
+        name: "{{ project_namespace }}"
+    pre_check:
+      command: "oc get crd trustyaiservices.trustyai.opendatahub.io --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      on_fail: STOP
+    action:
+      type: none
+    post_check:
+      command: "oc get crd trustyaiservices.trustyai.opendatahub.io --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: create-trustyai-service
+    confidence: doc-derived
+    description: Create TrustyAIService CR to monitor models in the project
+    pre_check:
+      command: "oc get trustyaiservice -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: trustyai.opendatahub.io/v1alpha1
+        kind: TrustyAIService
+        metadata:
+          name: trustyai
+          namespace: {{ project_namespace }}
+          labels:
+            opendatahub.io/dashboard: "true"
+        spec:
+          storage:
+            format: "{{ storage_type }}"
+            folder: "/inputs"
+            size: "{{ storage_size }}"
+          data:
+            filename: "inference-data.csv"
+            format: "CSV"
+          metrics:
+            schedule: "{{ metrics_schedule }}"
+            batchSize: 500
+    post_check:
+      command: "oc get trustyaiservice trustyai -n {{ project_namespace }} -o jsonpath='{.status.phase}' 2>/dev/null"
+      expected: "Ready"
+      timeout: "300s"
+      poll_interval: "15s"
+      on_fail: STOP
+    rollback: "oc delete trustyaiservice trustyai -n {{ project_namespace }}"
+
+  - id: get-trustyai-url
+    confidence: inferred
+    description: Get TrustyAI service URL for API calls
+    action:
+      type: query
+      command: "oc get route trustyai -n {{ project_namespace }} -o jsonpath='{.spec.host}' 2>/dev/null"
+      store_as: trustyai_host
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+    return: |
+      ✓ TrustyAI Service deployed in {{ project_namespace }}.
+
+      Service URL: https://{{ trustyai_host }}
+      Metrics schedule: {{ metrics_schedule }}
+      Storage: {{ storage_type }} ({{ storage_size }})
+
+      ─────────────────────────────────────────────────────
+      TrustyAI automatically collects inference data from KServe models
+      in namespace {{ project_namespace }} via PayloadProcessor.
+
+      REQUEST FAIRNESS METRICS:
+        # Statistical Parity Difference (gender bias check):
+        curl -X POST https://{{ trustyai_host }}/metrics/group/fairness/spd/request \
+          -H "Authorization: Bearer $(oc whoami -t)" \
+          -H "Content-Type: application/json" \
+          -d '{
+            "modelId": "my-model",
+            "protectedAttribute": "gender",
+            "favorableOutcome": {"type":"INT32","value":"1"},
+            "outcomeName": "prediction",
+            "privilegedAttribute": {"type":"STRING","value":"male"},
+            "unprivilegedAttribute": {"type":"STRING","value":"female"}
+          }'
+
+      REQUEST DATA DRIFT DETECTION:
+        # KSTest for distribution shift:
+        curl -X POST https://{{ trustyai_host }}/metrics/drift/kstest/request \
+          -H "Authorization: Bearer $(oc whoami -t)" \
+          -H "Content-Type: application/json" \
+          -d '{
+            "modelId": "my-model",
+            "referenceTag": "TRAINING",
+            "metricName": "kstest"
+          }'
+
+      GET SHAP EXPLANATION:
+        curl -X POST https://{{ trustyai_host }}/explainers/local/shap \
+          -H "Authorization: Bearer $(oc whoami -t)" \
+          -H "Content-Type: application/json" \
+          -d '{
+            "modelId": "my-model",
+            "inputs": [{"name":"age","value":45,"type":"DOUBLE"},
+                       {"name":"income","value":75000,"type":"DOUBLE"}]
+          }'
+
+      Dashboard: Projects → {{ project_namespace }} → Models → (metrics tab)
+      ─────────────────────────────────────────────────────
+
+known_bad_patterns:
+  - "never use DATABASE storage without a PostgreSQL secret — TrustyAI will fail to start"
+  - "never set metrics schedule below 5s in production — it will overload Prometheus"
+  - "never deploy TrustyAI without models in the namespace — it monitors what exists in that namespace"
+  - "never delete the TrustyAI PVC — all collected inference data will be lost"
+
+rollback_order:
+  - "oc delete trustyaiservice trustyai -n {{ project_namespace }}"

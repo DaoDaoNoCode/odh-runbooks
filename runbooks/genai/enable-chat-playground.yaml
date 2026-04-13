@@ -1,0 +1,109 @@
+name: genai-enable-chat-playground
+description: >
+  Enable the GenAI chat playground in the ODH dashboard and connect a deployed model.
+  The gen-ai package is a standalone React frontend + Go BFF that proxies to Llama Stack.
+  It appears in the dashboard as a separate page/app once a model is deployed and configured.
+  NOTE: confidence is 'inferred' — GenAI package has limited public documentation.
+rhoai_version_tested: null
+confidence_overall: inferred
+
+parameters:
+  - name: project_namespace
+    description: Project namespace where the model is deployed
+    required: true
+  - name: model_name
+    description: Name of the deployed InferenceService to connect to playground
+    required: true
+  - name: model_url
+    description: "Inference endpoint URL (e.g. from deploy-vllm-model output)"
+    required: true
+
+steps:
+  - id: verify-model-deployed
+    confidence: doc-derived
+    description: Verify the model InferenceService is in Loaded state
+    requires:
+      - type: kserve-enabled
+      - type: namespace
+        name: "{{ project_namespace }}"
+    pre_check:
+      command: "oc get inferenceservice {{ model_name }} -n {{ project_namespace }} -o jsonpath='{.status.modelStatus.states.activeModelState}'"
+      expected: "Loaded"
+      on_fail: STOP
+    action:
+      type: none
+    post_check:
+      command: "oc get inferenceservice {{ model_name }} -n {{ project_namespace }} -o jsonpath='{.status.modelStatus.states.activeModelState}'"
+      expected: "Loaded"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: check-genai-feature-flag
+    confidence: uncertain
+    description: >
+      Check if genAI / LLM serving feature flag is enabled in dashboard config.
+      The exact feature flag name for GenAI playground is not confirmed.
+    action:
+      type: query
+      command: "oc get configmap odh-dashboard-config -n redhat-ods-applications -o jsonpath='{.data}' 2>/dev/null || echo 'not-found'"
+      store_as: dashboard_config
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: verify-model-openai-compatible
+    confidence: inferred
+    description: Test that the model endpoint responds to OpenAI-compatible /v1/models
+    action:
+      type: api_call
+      method: GET
+      url: "{{ model_url }}/v1/models"
+      headers:
+        Content-Type: "application/json"
+      store_response_as: models_response
+    post_check:
+      assert: models_response is not empty
+      command: "echo ok"
+      expected: "ok"
+      timeout: "30s"
+      on_fail: STOP
+
+  - id: get-dashboard-url
+    confidence: inferred
+    description: Get the ODH dashboard URL
+    action:
+      type: query
+      command: "oc get route rhods-dashboard -n redhat-ods-applications -o jsonpath='{.spec.host}' 2>/dev/null"
+      store_as: dashboard_host
+    post_check:
+      assert: dashboard_host is not empty
+      command: "oc get route rhods-dashboard -n redhat-ods-applications -o jsonpath='{.spec.host}'"
+      expected_min: 1
+      timeout: "10s"
+      on_fail: STOP
+    return: |
+      ✓ Model endpoint verified for chat playground.
+
+      Model: {{ model_name }}
+      Endpoint: {{ model_url }}
+      OpenAI-compatible: ✓
+
+      Dashboard: https://{{ dashboard_host }}
+      Look for: AI/LLM Playground or Chat section in the left navigation
+
+      Manual step: If the playground is not visible, check with your admin that
+      the GenAI feature flag is enabled in the dashboard configuration.
+
+      Direct API test:
+        curl -X POST {{ model_url }}/v1/chat/completions \
+          -H "Content-Type: application/json" \
+          -d '{"model": "{{ model_name }}", "messages": [{"role": "user", "content": "Hello!"}], "stream": false}'
+
+known_bad_patterns:
+  - "never try to use the chat playground with a non-LLM model — it requires an OpenAI-compatible /v1/chat/completions endpoint"
+  - "never expect the playground to appear without the model being fully loaded (Loaded state)"
+  - "never configure the playground with a model serving vanilla REST (non-OpenAI) format"
+
+rollback_order: []

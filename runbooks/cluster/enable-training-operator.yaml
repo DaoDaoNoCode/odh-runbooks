@@ -1,0 +1,63 @@
+name: cluster-enable-training-operator
+description: >
+  Enable the Kubeflow Training Operator in DataScienceCluster.
+  Provides CRDs for: PyTorchJob, TFJob, XGBoostJob, MPIJob, JAXJob.
+  Required for distributed model training from notebooks or pipelines.
+rhoai_version_tested: null
+confidence_overall: doc-derived
+
+parameters: []
+
+steps:
+  - id: enable-training-operator
+    confidence: doc-derived
+    description: Enable trainingOperator in DataScienceCluster
+    requires:
+      - type: dsc-exists
+    pre_check:
+      command: "oc get dsc -o jsonpath='{.items[0].spec.components.trainingoperator.managementState}'"
+      expected: "Managed"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: patch
+      target: "$(oc get dsc -o name | head -1)"
+      patch: '{"spec":{"components":{"trainingoperator":{"managementState":"Managed"}}}}'
+      dry_run: false
+    post_check:
+      command: "oc get dsc -o jsonpath='{.items[0].spec.components.trainingoperator.managementState}'"
+      expected: "Managed"
+      timeout: "30s"
+      on_fail: STOP
+
+  - id: wait-training-operator-ready
+    confidence: doc-derived
+    description: Wait for DataScienceCluster to reconcile Training Operator
+    action:
+      type: wait
+      command: "oc wait dsc --all --for=condition=Ready --timeout=300s 2>/dev/null || sleep 10"
+    post_check:
+      command: "oc get crd pytorchjobs.kubeflow.org --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "300s"
+      poll_interval: "15s"
+      on_fail: STOP
+    return: |
+      ✓ Training Operator enabled.
+
+      CRDs available:
+        pytorchjobs.kubeflow.org    — Distributed PyTorch training
+        tfjobs.kubeflow.org         — Distributed TensorFlow training
+        xgboostjobs.kubeflow.org    — XGBoost training
+        mpijobs.kubeflow.org        — MPI-based distributed training
+        jaxjobs.kubeflow.org        — JAX training
+
+      Next step: Submit a training job
+        odh run model-training/submit-pytorch-job
+
+known_bad_patterns:
+  - "never submit PyTorchJob without enabling the Training Operator first — the CRD won't exist"
+  - "never use the training operator without disabling Istio sidecar injection in job pods"
+
+rollback_order:
+  - "oc patch $(oc get dsc -o name | head -1) --type merge -p '{\"spec\":{\"components\":{\"trainingoperator\":{\"managementState\":\"Removed\"}}}}'"

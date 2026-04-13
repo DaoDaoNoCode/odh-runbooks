@@ -1,0 +1,91 @@
+name: cluster-configure-culler
+description: >
+  Configure the notebook auto-stop (culler) in ODH cluster settings.
+  The culler stops idle notebooks after a configurable timeout to save resources.
+  Configured via the OdhDashboardConfig CR in redhat-ods-applications namespace.
+  Dashboard: Cluster settings → Stop idle notebooks.
+rhoai_version_tested: null
+confidence_overall: inferred
+
+parameters:
+  - name: idle_timeout_minutes
+    description: Stop notebook after this many minutes of inactivity (0 = disabled)
+    required: false
+    default: "60"
+
+steps:
+  - id: get-dashboard-config
+    confidence: inferred
+    description: Check current culler configuration
+    requires:
+      - type: dsc-exists
+    action:
+      type: query
+      command: "oc get odhdashboardconfig -n redhat-ods-applications -o jsonpath='{.items[0].spec.notebookController.notebookNamespace}' 2>/dev/null || echo 'not-found'"
+      store_as: current_config
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: patch-culler-config
+    confidence: inferred
+    description: Update OdhDashboardConfig to set idle notebook timeout
+    action:
+      type: patch
+      target: "odhdashboardconfig/$(oc get odhdashboardconfig -n redhat-ods-applications -o name | head -1 | cut -d/ -f2)"
+      patch: >
+        {"spec":{"notebookController":{"enabled":true,
+        "notebookNamespace":"rhods-notebooks",
+        "pvcSize":"20Gi",
+        "notebookTolerations":{"enabled":false,"key":"NotebookOnly","operator":"Exists","effect":"NoSchedule"}}}}
+      dry_run: false
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "30s"
+      on_fail: STOP
+
+  - id: patch-culler-configmap
+    confidence: inferred
+    description: Set idle timeout in the notebook controller culler ConfigMap
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: notebook-controller-culler-config
+          namespace: redhat-ods-applications
+        data:
+          ENABLE_CULLING: "true"
+          CULL_IDLE_TIME: "{{ idle_timeout_minutes }}"
+          IDLENESS_CHECK_PERIOD: "1"
+    post_check:
+      command: "oc get configmap notebook-controller-culler-config -n redhat-ods-applications -o jsonpath='{.data.CULL_IDLE_TIME}'"
+      expected: "{{ idle_timeout_minutes }}"
+      timeout: "30s"
+      on_fail: STOP
+    return: |
+      ✓ Notebook culler configured.
+
+      Idle timeout: {{ idle_timeout_minutes }} minutes
+      Check period: 1 minute
+
+      Notebooks idle for {{ idle_timeout_minutes }} minutes will be automatically stopped.
+      Users can restart them from the dashboard.
+
+      To disable:
+        Set ENABLE_CULLING: "false" in notebook-controller-culler-config ConfigMap
+
+      Dashboard: Cluster Settings → Stop idle notebooks → Enabled ({{ idle_timeout_minutes }} min)
+
+known_bad_patterns:
+  - "never set CULL_IDLE_TIME to 0 with ENABLE_CULLING=true — behavior is undefined"
+  - "never set the timeout below 15 minutes — notebooks have background activity that triggers false idle detection"
+  - "never modify the culler ConfigMap directly in production without testing in dev first — it affects all notebooks cluster-wide"
+
+rollback_order:
+  - "oc patch configmap notebook-controller-culler-config -n redhat-ods-applications --type merge -p '{\"data\":{\"ENABLE_CULLING\":\"false\"}}'"

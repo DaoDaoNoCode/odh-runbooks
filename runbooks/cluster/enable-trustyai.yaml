@@ -1,0 +1,62 @@
+name: cluster-enable-trustyai
+description: >
+  Enable TrustyAI component in DataScienceCluster.
+  TrustyAI provides: model fairness metrics, data drift detection, and explainability.
+  Also enables LMEval for EvalHub evaluation runs.
+  After enabling, deploy TrustyAIService CRs in each project via trustyai/enable-trustyai-service.
+rhoai_version_tested: null
+confidence_overall: doc-derived
+
+parameters: []
+
+steps:
+  - id: enable-trustyai
+    confidence: doc-derived
+    description: Enable TrustyAI in DataScienceCluster with LMEval support
+    requires:
+      - type: dsc-exists
+    pre_check:
+      command: "oc get dsc -o jsonpath='{.items[0].spec.components.trustyai.managementState}' 2>/dev/null"
+      expected: "Managed"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: patch
+      target: "$(oc get dsc -o name | head -1)"
+      patch: >
+        {"spec":{"components":{"trustyai":{"managementState":"Managed",
+        "eval":{"lmeval":{"permitCodeExecution":"allow","permitOnline":"allow"}}}}}}
+      dry_run: false
+    post_check:
+      command: "oc get dsc -o jsonpath='{.items[0].spec.components.trustyai.managementState}' 2>/dev/null"
+      expected: "Managed"
+      timeout: "30s"
+      on_fail: STOP
+
+  - id: wait-trustyai-ready
+    confidence: doc-derived
+    description: Wait for DataScienceCluster to reconcile TrustyAI component
+    action:
+      type: wait
+      command: "oc wait dsc --all --for=condition=Ready --timeout=300s 2>/dev/null || oc wait dsc --all --for=condition=ReconcileComplete --timeout=300s"
+    post_check:
+      command: "oc get crd trustyaiservices.trustyai.opendatahub.io --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "300s"
+      poll_interval: "15s"
+      on_fail: STOP
+    return: |
+      ✓ TrustyAI enabled.
+
+      CRD: trustyai.opendatahub.io/v1alpha1 TrustyAIService
+      LMEval: enabled (permitCodeExecution=allow, permitOnline=allow)
+
+      Next step: Deploy a TrustyAIService in your project:
+        odh run trustyai/enable-trustyai-service -p project_namespace=<ns>
+
+known_bad_patterns:
+  - "never create TrustyAIService before enabling TrustyAI in DSC — the operator won't be present"
+  - "never set permitCodeExecution=deny if you want EvalHub to run evaluation jobs"
+
+rollback_order:
+  - "oc patch $(oc get dsc -o name | head -1) --type merge -p '{\"spec\":{\"components\":{\"trustyai\":{\"managementState\":\"Removed\"}}}}'"

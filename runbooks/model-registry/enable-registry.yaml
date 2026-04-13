@@ -1,0 +1,132 @@
+name: model-registry-enable-registry
+description: >
+  Create a new Model Registry instance in the ODH platform.
+  CORRECT CRD: modelregistry.opendatahub.io/v1beta1 (NOT v1alpha1 — dashboard uses v1beta1)
+  The dashboard creates a Secret for the DB password with keys: database-name, database-user, database-password
+  The dashboard reads registries from the odh-model-registries namespace.
+rhoai_version_tested: null
+confidence_overall: doc-derived
+
+parameters:
+  - name: registry_name
+    description: Name for the model registry instance
+    required: false
+    default: model-registry
+  - name: registry_namespace
+    description: Namespace where registry is deployed (must be odh-model-registries)
+    required: false
+    default: odh-model-registries
+
+steps:
+  - id: check-model-registry-component-enabled
+    confidence: doc-derived
+    description: Verify ModelRegistry component is enabled in DataScienceCluster
+    requires:
+      - type: model-registry-enabled
+    pre_check:
+      command: "oc get crd modelregistries.modelregistry.opendatahub.io --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      on_fail: STOP
+    action:
+      type: none
+    post_check:
+      command: "oc get crd modelregistries.modelregistry.opendatahub.io --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: create-registry-namespace
+    confidence: doc-derived
+    description: Create odh-model-registries namespace if it doesn't exist
+    pre_check:
+      command: "oc get namespace {{ registry_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: {{ registry_namespace }}
+          labels:
+            opendatahub.io/dashboard: "true"
+    post_check:
+      command: "oc get namespace {{ registry_namespace }} -o jsonpath='{.status.phase}'"
+      expected: "Active"
+      timeout: "30s"
+      on_fail: STOP
+
+  - id: create-model-registry-cr
+    confidence: doc-derived
+    description: >
+      Create ModelRegistry CR using the CORRECT API version: v1beta1 (not v1alpha1).
+      Dashboard reads from modelregistry.opendatahub.io/v1beta1.
+      Using SQLite via embedded DB for simplicity (no external DB secret needed).
+    pre_check:
+      command: "oc get modelregistry {{ registry_name }} -n {{ registry_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: modelregistry.opendatahub.io/v1beta1
+        kind: ModelRegistry
+        metadata:
+          name: {{ registry_name }}
+          namespace: {{ registry_namespace }}
+          labels:
+            opendatahub.io/dashboard: "true"
+          annotations:
+            openshift.io/display-name: "{{ registry_name }}"
+        spec:
+          grpc:
+            port: 9090
+          rest:
+            port: 8080
+            serviceRoute: enabled
+    post_check:
+      command: "oc get modelregistry {{ registry_name }} -n {{ registry_namespace }} -o jsonpath='{.status.conditions[?(@.type==\"Ready\")].status}' 2>/dev/null"
+      expected: "True"
+      timeout: "300s"
+      poll_interval: "15s"
+      on_fail: STOP
+    rollback: "oc delete modelregistry {{ registry_name }} -n {{ registry_namespace }}"
+
+  - id: get-registry-url
+    confidence: doc-derived
+    description: Get the model registry REST API URL
+    action:
+      type: query
+      command: "oc get route {{ registry_name }}-rest -n {{ registry_namespace }} -o jsonpath='{.spec.host}' 2>/dev/null"
+      store_as: registry_host
+    post_check:
+      assert: registry_host is not empty
+      command: "oc get route {{ registry_name }}-rest -n {{ registry_namespace }} -o jsonpath='{.spec.host}'"
+      expected_min: 1
+      timeout: "60s"
+      on_fail: STOP
+    return: |
+      ✓ Model Registry created: {{ registry_name }}
+
+      API version: modelregistry.opendatahub.io/v1beta1
+      REST API:    https://{{ registry_host }}/api/model_registry/v1alpha3
+      Dashboard:   Model Registry section in ODH dashboard
+
+      The dashboard discovers registries by:
+        oc get modelregistry -n odh-model-registries
+
+      Next step: Register a model
+        odh run model-registry/register-model -p registry_name={{ registry_name }}
+
+known_bad_patterns:
+  - "CRITICAL: API version must be v1beta1 — using v1alpha1 will fail as the CRD is v1beta1"
+  - "CRITICAL: registry must be in odh-model-registries namespace — dashboard hardcodes this namespace for discovery"
+  - "never delete a ModelRegistry that has registered models without backing up the database first"
+
+rollback_order:
+  - "oc delete modelregistry {{ registry_name }} -n {{ registry_namespace }}"

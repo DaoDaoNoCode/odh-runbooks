@@ -1,0 +1,103 @@
+name: model-serving-test-model-endpoint
+description: >
+  Send a test inference request to a deployed model and verify it responds.
+  Supports both KServe v2 inference protocol and OpenAI-compatible endpoints.
+  Read-only diagnostic — does not modify any resources.
+rhoai_version_tested: null
+confidence_overall: inferred
+
+parameters:
+  - name: project_namespace
+    description: Project namespace where model is deployed
+    required: true
+  - name: model_name
+    description: Name of the InferenceService
+    required: true
+  - name: protocol
+    description: "Protocol: kserve-v2 or openai"
+    required: false
+    default: openai
+
+steps:
+  - id: check-model-loaded
+    confidence: doc-derived
+    description: Verify model is in Loaded state
+    requires:
+      - type: namespace
+        name: "{{ project_namespace }}"
+    pre_check:
+      command: "oc get inferenceservice {{ model_name }} -n {{ project_namespace }} -o jsonpath='{.status.modelStatus.states.activeModelState}'"
+      expected: "Loaded"
+      on_fail: STOP
+    action:
+      type: none
+    post_check:
+      command: "oc get inferenceservice {{ model_name }} -n {{ project_namespace }} -o jsonpath='{.status.modelStatus.states.activeModelState}'"
+      expected: "Loaded"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: get-model-url
+    confidence: inferred
+    description: Get the inference endpoint URL
+    action:
+      type: query
+      command: "oc get inferenceservice {{ model_name }} -n {{ project_namespace }} -o jsonpath='{.status.url}'"
+      store_as: model_url
+    post_check:
+      assert: model_url is not empty
+      command: "oc get inferenceservice {{ model_name }} -n {{ project_namespace }} -o jsonpath='{.status.url}'"
+      expected_min: 1
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: get-cluster-token
+    confidence: doc-derived
+    description: Get auth token for request
+    action:
+      type: query
+      command: "oc whoami -t"
+      store_as: oc_token
+    post_check:
+      assert: oc_token is not empty
+      command: "oc whoami -t"
+      expected_min: 1
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: test-openai-endpoint
+    confidence: inferred
+    description: Send test request to OpenAI-compatible /v1/models endpoint
+    action:
+      type: api_call
+      method: GET
+      url: "{{ model_url }}/v1/models"
+      headers:
+        Authorization: "Bearer {{ oc_token }}"
+        Content-Type: "application/json"
+      store_response_as: models_list
+    post_check:
+      assert: models_list is not empty
+      command: "echo ok"
+      expected: "ok"
+      timeout: "30s"
+      on_fail: STOP
+    return: |
+      ✓ Model endpoint is responding.
+
+      Model:    {{ model_name }}
+      Endpoint: {{ model_url }}
+
+      Available models: {{ models_list }}
+
+      Test chat completion:
+        curl -X POST {{ model_url }}/v1/chat/completions \
+          -H "Authorization: Bearer $(oc whoami -t)" \
+          -H "Content-Type: application/json" \
+          -d '{"model":"{{ model_name }}","messages":[{"role":"user","content":"Hello!"}]}'
+
+known_bad_patterns:
+  - "never test a model that is not in Loaded state — the request will fail with a confusing error"
+  - "never send production traffic to a model that hasn't passed this test"
+
+rollback_order: []

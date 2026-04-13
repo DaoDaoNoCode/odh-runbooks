@@ -1,0 +1,160 @@
+name: model-serving-create-custom-runtime
+description: >
+  Create a custom KServe ServingRuntime for model formats not supported by default runtimes.
+  ServingRuntime defines: container image, supported model formats, protocol versions, resources.
+  Single-model runtimes (multiModel: false) are used for dedicated model servers.
+  Multi-model runtimes (multiModel: true) share one server across multiple models (ModelMesh).
+rhoai_version_tested: null
+confidence_overall: doc-derived
+
+parameters:
+  - name: project_namespace
+    description: Project namespace to create the runtime in
+    required: true
+  - name: runtime_name
+    description: Name for the ServingRuntime
+    required: true
+  - name: runtime_image
+    description: Container image for the model server
+    required: true
+  - name: model_format_name
+    description: Model format this runtime handles (e.g. vllm, onnx, sklearn)
+    required: true
+  - name: protocol_version
+    description: "Inference protocol: v2 (KFServing v2), v1, grpc-v2"
+    required: false
+    default: v2
+  - name: cpu_request
+    description: CPU request per model server
+    required: false
+    default: "1"
+  - name: memory_request
+    description: Memory request per model server
+    required: false
+    default: "4Gi"
+  - name: server_port
+    description: Port the model server listens on
+    required: false
+    default: "8080"
+
+steps:
+  - id: check-kserve-installed
+    confidence: doc-derived
+    description: Verify KServe ServingRuntime CRD exists
+    requires:
+      - type: kserve-enabled
+      - type: namespace
+        name: "{{ project_namespace }}"
+    pre_check:
+      command: "oc get crd servingruntimes.serving.kserve.io --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      on_fail: STOP
+    action:
+      type: none
+    post_check:
+      command: "oc get crd servingruntimes.serving.kserve.io --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: create-serving-runtime
+    confidence: doc-derived
+    description: Create the custom ServingRuntime CR
+    pre_check:
+      command: "oc get servingruntime {{ runtime_name }} -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: serving.kserve.io/v1alpha1
+        kind: ServingRuntime
+        metadata:
+          name: {{ runtime_name }}
+          namespace: {{ project_namespace }}
+          labels:
+            opendatahub.io/dashboard: "true"
+          annotations:
+            openshift.io/display-name: "{{ runtime_name }}"
+            opendatahub.io/template-display-name: "Custom ServingRuntime"
+        spec:
+          multiModel: false
+          volumes:
+            - name: shm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 2Gi
+          supportedModelFormats:
+            - name: {{ model_format_name }}
+              version: "1"
+              autoSelect: true
+              priority: 1
+          supportedProtocolVersions:
+            - "{{ protocol_version }}"
+          containers:
+            - name: kserve-container
+              image: {{ runtime_image }}
+              ports:
+                - containerPort: {{ server_port }}
+                  protocol: TCP
+                  name: h2c
+              env:
+                - name: MODEL_DIR
+                  value: /mnt/models
+                - name: HTTP_PORT
+                  value: "{{ server_port }}"
+              resources:
+                requests:
+                  cpu: "{{ cpu_request }}"
+                  memory: "{{ memory_request }}"
+                limits:
+                  cpu: "{{ cpu_request }}"
+                  memory: "{{ memory_request }}"
+              readinessProbe:
+                httpGet:
+                  path: /v2/health/ready
+                  port: {{ server_port }}
+                initialDelaySeconds: 30
+                periodSeconds: 10
+              volumeMounts:
+                - name: shm
+                  mountPath: /dev/shm
+    post_check:
+      command: "oc get servingruntime {{ runtime_name }} -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      timeout: "30s"
+      on_fail: STOP
+    rollback: "oc delete servingruntime {{ runtime_name }} -n {{ project_namespace }}"
+    return: |
+      ✓ Custom ServingRuntime created: {{ runtime_name }}
+
+      Format supported: {{ model_format_name }}
+      Protocol: {{ protocol_version }}
+      Image: {{ runtime_image }}
+
+      Use this runtime when deploying a model:
+        odh run model-serving/deploy-kserve-model \
+          -p project_namespace={{ project_namespace }} \
+          -p model_name=my-model \
+          -p model_format={{ model_format_name }} \
+          -p model_uri=s3://...
+
+      The runtime will be auto-selected based on modelFormat.name = {{ model_format_name }}
+
+      Common runtime images:
+        vLLM:          quay.io/opendatahub/vllm:stable
+        ONNX Runtime:  docker.io/seldonio/mlserver:1.5.0-slim
+        SKLearn:       docker.io/kserve/sklearnserver:latest
+        XGBoost:       docker.io/kserve/xgbserver:latest
+        TorchServe:    docker.io/kserve/torchserve-kfs:0.9.0
+
+known_bad_patterns:
+  - "never set autoSelect: true for multiple runtimes supporting the same format and version — it creates ambiguity"
+  - "never omit the readinessProbe — KServe will not mark the model as Loaded without it"
+  - "never use a runtime image without checking it implements the KServe v2 prediction protocol — requests will fail"
+  - "never create a ServingRuntime in the redhat-ods-applications namespace — put it in the project namespace"
+
+rollback_order:
+  - "oc delete servingruntime {{ runtime_name }} -n {{ project_namespace }}"

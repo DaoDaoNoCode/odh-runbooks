@@ -1,0 +1,317 @@
+name: dependencies-provision-minio
+description: >
+  Deploy a MinIO S3-compatible object store on the cluster.
+  Used as an auto-resolver when no external S3 is available.
+  NOT for production — for development and testing only.
+  Source: https://ai-on-openshift.io/tools-and-applications/minio/minio/
+  Creates: PVC, Secret, Deployment, Service, Routes, and initial buckets via mc job.
+rhoai_version_tested: null
+confidence_overall: doc-derived
+
+parameters:
+  - name: minio_namespace
+    description: Namespace to deploy MinIO into
+    required: false
+    default: minio
+  - name: minio_storage_size
+    description: PVC size for MinIO data
+    required: false
+    default: "20Gi"
+  - name: minio_root_user
+    description: MinIO root username
+    required: false
+    default: minio
+  - name: minio_root_password
+    description: MinIO root password (min 8 chars). Change this — do not leave the default.
+    required: false
+    default: minio-dev-only
+    hint: "CHANGE THIS. The default is intentionally weak and labeled 'dev-only'. Use a real password for anything beyond local testing."
+  - name: buckets
+    description: "Comma-separated bucket names to create (e.g. pipelines,models,mlflow)"
+    required: false
+    default: "odh-pipelines,odh-models,odh-mlflow"
+
+steps:
+  - id: create-minio-namespace
+    confidence: doc-derived
+    description: Create MinIO namespace
+    requires:
+      - type: openshift-cluster
+      - type: storage-class
+    pre_check:
+      command: "oc get namespace {{ minio_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: {{ minio_namespace }}
+          labels:
+            app: minio
+    post_check:
+      command: "oc get namespace {{ minio_namespace }} -o jsonpath='{.status.phase}'"
+      expected: "Active"
+      timeout: "30s"
+      on_fail: STOP
+
+  - id: deploy-minio
+    confidence: doc-derived
+    description: Deploy MinIO with PVC, credentials secret, service, and routes
+    pre_check:
+      command: "oc get deployment minio -n {{ minio_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        ---
+        kind: PersistentVolumeClaim
+        apiVersion: v1
+        metadata:
+          name: minio-pvc
+          namespace: {{ minio_namespace }}
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: {{ minio_storage_size }}
+          volumeMode: Filesystem
+        ---
+        kind: Secret
+        apiVersion: v1
+        metadata:
+          name: minio-secret
+          namespace: {{ minio_namespace }}
+        stringData:
+          minio_root_user: {{ minio_root_user }}
+          minio_root_password: {{ minio_root_password }}
+        ---
+        kind: Deployment
+        apiVersion: apps/v1
+        metadata:
+          name: minio
+          namespace: {{ minio_namespace }}
+          labels:
+            app: minio
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: minio
+          strategy:
+            type: Recreate
+          template:
+            metadata:
+              labels:
+                app: minio
+            spec:
+              volumes:
+                - name: data
+                  persistentVolumeClaim:
+                    claimName: minio-pvc
+              containers:
+                - name: minio
+                  image: quay.io/minio/minio:latest
+                  args:
+                    - server
+                    - /data
+                    - --console-address
+                    - :9090
+                  env:
+                    - name: MINIO_ROOT_USER
+                      valueFrom:
+                        secretKeyRef:
+                          name: minio-secret
+                          key: minio_root_user
+                    - name: MINIO_ROOT_PASSWORD
+                      valueFrom:
+                        secretKeyRef:
+                          name: minio-secret
+                          key: minio_root_password
+                  ports:
+                    - containerPort: 9000
+                      protocol: TCP
+                    - containerPort: 9090
+                      protocol: TCP
+                  resources:
+                    requests:
+                      cpu: 20m
+                      memory: 100Mi
+                    limits:
+                      cpu: 250m
+                      memory: 1Gi
+                  readinessProbe:
+                    tcpSocket:
+                      port: 9000
+                    initialDelaySeconds: 5
+                    periodSeconds: 5
+                  livenessProbe:
+                    tcpSocket:
+                      port: 9000
+                    initialDelaySeconds: 30
+                    periodSeconds: 5
+                  volumeMounts:
+                    - name: data
+                      mountPath: /data
+                      subPath: minio
+                  securityContext: {}
+        ---
+        kind: Service
+        apiVersion: v1
+        metadata:
+          name: minio-service
+          namespace: {{ minio_namespace }}
+        spec:
+          selector:
+            app: minio
+          ports:
+            - name: api
+              port: 9000
+              targetPort: 9000
+            - name: ui
+              port: 9090
+              targetPort: 9090
+          type: ClusterIP
+        ---
+        kind: Route
+        apiVersion: route.openshift.io/v1
+        metadata:
+          name: minio-api
+          namespace: {{ minio_namespace }}
+        spec:
+          to:
+            kind: Service
+            name: minio-service
+          port:
+            targetPort: api
+          tls:
+            termination: edge
+            insecureEdgeTerminationPolicy: Redirect
+        ---
+        kind: Route
+        apiVersion: route.openshift.io/v1
+        metadata:
+          name: minio-ui
+          namespace: {{ minio_namespace }}
+        spec:
+          to:
+            kind: Service
+            name: minio-service
+          port:
+            targetPort: ui
+          tls:
+            termination: edge
+            insecureEdgeTerminationPolicy: Redirect
+    post_check:
+      command: "oc get deployment minio -n {{ minio_namespace }} -o jsonpath='{.status.availableReplicas}' 2>/dev/null"
+      expected: "1"
+      timeout: "300s"
+      poll_interval: "15s"
+      on_fail: STOP
+    rollback: "oc delete deployment minio service minio-service pvc minio-pvc secret minio-secret route minio-api minio-ui -n {{ minio_namespace }}"
+
+  - id: get-minio-endpoint
+    confidence: doc-derived
+    description: Get MinIO API route hostname
+    action:
+      type: query
+      command: "oc get route minio-api -n {{ minio_namespace }} -o jsonpath='{.spec.host}'"
+      store_as: minio_host
+    post_check:
+      assert: minio_host is not empty
+      command: "oc get route minio-api -n {{ minio_namespace }} -o jsonpath='{.spec.host}'"
+      expected_min: 1
+      timeout: "30s"
+      on_fail: STOP
+
+  - id: create-buckets
+    confidence: doc-derived
+    description: Create initial S3 buckets via mc CLI job
+    pre_check:
+      command: "oc get job minio-bucket-setup -n {{ minio_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: batch/v1
+        kind: Job
+        metadata:
+          name: minio-bucket-setup
+          namespace: {{ minio_namespace }}
+        spec:
+          template:
+            spec:
+              restartPolicy: OnFailure
+              containers:
+                - name: mc
+                  image: quay.io/minio/mc:latest
+                  command:
+                    - /bin/sh
+                    - -c
+                    - |
+                      set -e
+                      echo "Waiting for MinIO to be ready..."
+                      until mc alias set myminio http://minio-service:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD}; do
+                        sleep 5
+                      done
+                      echo "Creating buckets..."
+                      for bucket in $(echo "{{ buckets }}" | tr ',' ' '); do
+                        mc mb --ignore-existing myminio/$bucket
+                        echo "Created bucket: $bucket"
+                      done
+                      echo "Done."
+                  env:
+                    - name: MINIO_ROOT_USER
+                      valueFrom:
+                        secretKeyRef:
+                          name: minio-secret
+                          key: minio_root_user
+                    - name: MINIO_ROOT_PASSWORD
+                      valueFrom:
+                        secretKeyRef:
+                          name: minio-secret
+                          key: minio_root_password
+    post_check:
+      command: "oc get job minio-bucket-setup -n {{ minio_namespace }} -o jsonpath='{.status.conditions[?(@.type==\"Complete\")].status}' 2>/dev/null"
+      expected: "True"
+      timeout: "300s"
+      poll_interval: "10s"
+      on_fail: STOP
+    return: |
+      ✓ MinIO deployed and buckets created.
+
+      API endpoint:  https://{{ minio_host }}
+      Console:       https://{{ oc get route minio-ui -n {{ minio_namespace }} -o jsonpath='{.spec.host}' }}
+      Access key:    {{ minio_root_user }}
+      Secret key:    {{ minio_root_password }}
+      Buckets:       {{ buckets }}
+
+      Internal endpoint (for ODH connections):
+        http://minio-service.{{ minio_namespace }}.svc.cluster.local:9000
+
+      ⚠ This is NOT for production use. For production, use AWS S3, GCS, or
+        a production-grade MinIO deployment with proper auth and TLS.
+
+known_bad_patterns:
+  - "never use this MinIO in production — it has no HA, no backup, and default credentials"
+  - "never change minio_root_password to fewer than 8 characters — MinIO will reject it"
+  - "never deploy MinIO without enough PVC storage — pipelines + models can fill it quickly"
+
+rollback_order:
+  - "oc delete job minio-bucket-setup -n {{ minio_namespace }}"
+  - "oc delete deployment minio -n {{ minio_namespace }}"
+  - "oc delete service minio-service -n {{ minio_namespace }}"
+  - "oc delete route minio-api minio-ui -n {{ minio_namespace }}"
+  - "oc delete pvc minio-pvc -n {{ minio_namespace }}"
+  - "oc delete secret minio-secret -n {{ minio_namespace }}"

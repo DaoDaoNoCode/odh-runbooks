@@ -1,0 +1,99 @@
+name: cluster-enable-codeflare
+description: >
+  Enable CodeFlare (distributed workloads) in DataScienceCluster.
+  CodeFlare provides Ray, Kueue, and MCAD for distributed training and batch jobs.
+  Per ADR-DW-0001, ODH maintains its own fork of CodeFlare (snapshot, not diverged).
+rhoai_version_tested: null
+confidence_overall: doc-derived
+
+parameters: []
+
+steps:
+  - id: enable-codeflare
+    confidence: doc-derived
+    description: Enable CodeFlare component in DataScienceCluster
+    requires:
+      - type: dsc-exists
+    pre_check:
+      command: "oc get dsc -o jsonpath='{.items[0].spec.components.codeflare.managementState}'"
+      expected: "Managed"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: patch
+      target: "$(oc get dsc -o name | head -1)"
+      patch: '{"spec":{"components":{"codeflare":{"managementState":"Managed"}}}}'
+      dry_run: false
+    post_check:
+      command: "oc get dsc -o jsonpath='{.items[0].spec.components.codeflare.managementState}'"
+      expected: "Managed"
+      timeout: "30s"
+      on_fail: STOP
+
+  - id: enable-ray
+    confidence: doc-derived
+    description: Enable Ray component (required for distributed workloads)
+    pre_check:
+      command: "oc get dsc -o jsonpath='{.items[0].spec.components.ray.managementState}'"
+      expected: "Managed"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: patch
+      target: "$(oc get dsc -o name | head -1)"
+      patch: '{"spec":{"components":{"ray":{"managementState":"Managed"}}}}'
+      dry_run: false
+    post_check:
+      command: "oc get dsc -o jsonpath='{.items[0].spec.components.ray.managementState}'"
+      expected: "Managed"
+      timeout: "30s"
+      on_fail: STOP
+
+  - id: enable-kueue
+    confidence: doc-derived
+    description: Enable Kueue for resource quota and job queuing
+    pre_check:
+      command: "oc get dsc -o jsonpath='{.items[0].spec.components.kueue.managementState}'"
+      expected: "Managed"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: patch
+      target: "$(oc get dsc -o name | head -1)"
+      patch: '{"spec":{"components":{"kueue":{"managementState":"Managed"}}}}'
+      dry_run: false
+    post_check:
+      command: "oc get dsc -o jsonpath='{.items[0].spec.components.kueue.managementState}'"
+      expected: "Managed"
+      timeout: "30s"
+      on_fail: STOP
+
+  - id: wait-codeflare-ready
+    confidence: doc-derived
+    description: Wait for DataScienceCluster to finish reconciling CodeFlare/Ray/Kueue
+    action:
+      type: wait
+      command: "oc wait dsc --all --for=condition=Ready --timeout=300s 2>/dev/null || sleep 10"
+    post_check:
+      command: "oc get crd rayclusters.ray.io --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "300s"
+      poll_interval: "15s"
+      on_fail: STOP
+    return: |
+      ✓ CodeFlare / Distributed Workloads enabled.
+
+      Components: CodeFlare, Ray, Kueue
+      CRDs: RayCluster (ray.io/v1), AppWrapper, ResourceFlavor
+
+      Next step: odh run distributed-workloads/submit-ray-job
+
+known_bad_patterns:
+  - "never install the community CodeFlare operator separately — ODH manages its own fork and they cannot coexist on the same cluster"
+  - "never enable CodeFlare without also enabling Kueue — jobs will not be queued correctly"
+  - "never submit a RayJob without first creating a Kueue ResourceFlavor and ClusterQueue"
+
+rollback_order:
+  - "oc patch $(oc get dsc -o name | head -1) --type merge -p '{\"spec\":{\"components\":{\"codeflare\":{\"managementState\":\"Removed\"}}}}'"
+  - "oc patch $(oc get dsc -o name | head -1) --type merge -p '{\"spec\":{\"components\":{\"ray\":{\"managementState\":\"Removed\"}}}}'"
+  - "oc patch $(oc get dsc -o name | head -1) --type merge -p '{\"spec\":{\"components\":{\"kueue\":{\"managementState\":\"Removed\"}}}}'"

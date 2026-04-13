@@ -1,0 +1,359 @@
+name: evalhub-mlflow-run
+description: >
+  Enable TrustyAI + EvalHub, deploy a test model via KServe,
+  create an evaluation run linked to an MLflow experiment.
+  Returns the EvalHub dashboard URL on completion.
+rhoai_version_tested: null
+confidence_overall: inferred
+
+parameters:
+  - name: project_namespace
+    description: OpenShift project namespace to use
+    required: true
+    discover_cmd: "oc get namespace -l opendatahub.io/dashboard=true --no-headers -o jsonpath='{.items[*].metadata.name}'"
+    hint: "Must be an ODH Data Science Project (has opendatahub.io/dashboard=true label)"
+    example: "my-data-science-project"
+  - name: model_name
+    description: Name for the InferenceService
+    required: false
+    default: evalhub-test-model
+    example: "my-llm-model"
+    hint: "Lowercase letters, numbers, and hyphens only. Max 63 characters."
+  - name: model_uri
+    description: Path within your S3 bucket to the model artifacts
+    required: true
+    example: "models/llama3-8b"
+    hint: "This is the PATH within the bucket, not a full s3:// URI. The S3 connection provides the bucket and credentials."
+  - name: mlflow_experiment_name
+    description: Name of the MLflow experiment to create for this evaluation
+    required: false
+    default: evalhub-evaluation
+    example: "llama3-safety-eval"
+  - name: evalhub_instance_name
+    description: Name of the EvalHub CR instance
+    required: false
+    default: evalhub-instance
+    discover_cmd: "oc get evalhub -n {project_namespace} --no-headers -o jsonpath='{.items[*].metadata.name}' 2>/dev/null"
+    hint: "Leave as default unless you have a specific EvalHub instance to target"
+  - name: benchmark_provider
+    description: Which benchmark provider to use for the evaluation run
+    required: false
+    default: lm-evaluation-harness
+    enum: ["lm-evaluation-harness", "garak"]
+    hint: "lm-evaluation-harness: standard accuracy benchmarks (arc, hellaswag, etc). garak: safety/red-teaming."
+
+steps:
+
+  # ── PHASE 1: Verify and auto-provision all dependencies ──────────────────
+
+  - id: verify-dependencies
+    confidence: doc-derived
+    description: >
+      Auto-resolve all dependencies: DSC, namespace, TrustyAI, KServe, S3 connection.
+      Each missing dependency is provisioned automatically before proceeding.
+    requires:
+      - type: dsc-exists
+      - type: namespace
+        name: "{{ project_namespace }}"
+      - type: trustyai-enabled
+      - type: kserve-enabled
+      - type: s3-connection
+        namespace: "{{ project_namespace }}"
+    action:
+      type: none
+    post_check:
+      command: "oc get crd trustyaiservices.trustyai.opendatahub.io --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "10s"
+      on_fail: STOP
+
+  # ── PHASE 2: Create EvalHub instance ─────────────────────────────────────
+  # TrustyAI is already enabled by the requires: trustyai-enabled above
+
+  - id: create-evalhub-cr
+    confidence: doc-derived
+    description: Create EvalHub CR in the project namespace
+    pre_check:
+      command: "oc get evalhub {{ evalhub_instance_name }} -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: create
+      dry_run: true
+      manifest: |
+        apiVersion: trustyai.opendatahub.io/v1alpha1
+        kind: EvalHub
+        metadata:
+          name: {{ evalhub_instance_name }}
+          namespace: {{ project_namespace }}
+        spec:
+          replicas: 1
+          providers:
+            - lm-evaluation-harness
+            - garak
+          collections:
+            - leaderboard-v2
+            - safety-and-fairness-v1
+          database:
+            type: sqlite
+    post_check:
+      command: "oc get evalhub {{ evalhub_instance_name }} -n {{ project_namespace }} -o jsonpath='{.status.phase}' 2>/dev/null"
+      expected: "Ready"
+      timeout: "300s"
+      poll_interval: "10s"
+      on_fail: STOP
+    rollback: "oc delete evalhub {{ evalhub_instance_name }} -n {{ project_namespace }}"
+
+  # ── PHASE 3: RBAC setup ───────────────────────────────────────────────────
+
+  - id: create-evalhub-rbac
+    confidence: doc-derived
+    description: Create RBAC roles for EvalHub and MLflow access in project namespace
+    pre_check:
+      command: "oc get role eval-hub-user-access -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: v1
+        kind: ServiceAccount
+        metadata:
+          name: eval-hub-job
+          namespace: {{ project_namespace }}
+        ---
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: Role
+        metadata:
+          name: eval-hub-user-access
+          namespace: {{ project_namespace }}
+        rules:
+          - apiGroups: ["trustyai.opendatahub.io"]
+            resources: ["evaluations", "collections", "providers"]
+            verbs: ["get", "list", "create", "update", "patch", "delete"]
+          - apiGroups: ["trustyai.opendatahub.io"]
+            resources: ["status-events"]
+            verbs: ["create"]
+          - apiGroups: ["mlflow.kubeflow.org"]
+            resources: ["experiments"]
+            verbs: ["create", "update"]
+        ---
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: RoleBinding
+        metadata:
+          name: eval-hub-user-access
+          namespace: {{ project_namespace }}
+        subjects:
+          - kind: ServiceAccount
+            name: eval-hub-job
+            namespace: {{ project_namespace }}
+        roleRef:
+          apiGroup: rbac.authorization.k8s.io
+          kind: Role
+          name: eval-hub-user-access
+    post_check:
+      command: "oc get role eval-hub-user-access -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      timeout: "30s"
+      on_fail: STOP
+    rollback: "oc delete role eval-hub-user-access rolebinding eval-hub-user-access sa eval-hub-job -n {{ project_namespace }}"
+
+  # ── PHASE 4: Deploy model ─────────────────────────────────────────────────
+
+  - id: deploy-model
+    confidence: inferred
+    description: Deploy model via KServe InferenceService (RawDeployment mode)
+    pre_check:
+      command: "oc get inferenceservice {{ model_name }} -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: create
+      dry_run: true
+      manifest: |
+        apiVersion: serving.kserve.io/v1beta1
+        kind: InferenceService
+        metadata:
+          name: {{ model_name }}
+          namespace: {{ project_namespace }}
+          annotations:
+            openshift.io/display-name: "{{ model_name }}"
+            serving.kserve.io/deploymentMode: RawDeployment
+        spec:
+          predictor:
+            model:
+              modelFormat:
+                name: vllm
+              storageUri: {{ model_uri }}
+              resources:
+                requests:
+                  cpu: "1"
+                  memory: "4Gi"
+                limits:
+                  cpu: "4"
+                  memory: "8Gi"
+    post_check:
+      command: "oc get inferenceservice {{ model_name }} -n {{ project_namespace }} -o jsonpath='{.status.modelStatus.states.activeModelState}' 2>/dev/null"
+      expected: "Loaded"
+      timeout: "600s"
+      poll_interval: "15s"
+      on_fail: STOP
+    rollback: "oc delete inferenceservice {{ model_name }} -n {{ project_namespace }}"
+
+  - id: get-model-url
+    confidence: inferred
+    description: Retrieve the model inference endpoint URL
+    action:
+      type: query
+      command: "oc get inferenceservice {{ model_name }} -n {{ project_namespace }} -o jsonpath='{.status.url}'"
+      store_as: model_url
+    post_check:
+      assert: model_url is not empty
+      command: "oc get inferenceservice {{ model_name }} -n {{ project_namespace }} -o jsonpath='{.status.url}'"
+      expected_min: 1
+      timeout: "30s"
+      on_fail: STOP
+
+  # ── PHASE 5: Create evaluation run ───────────────────────────────────────
+
+  - id: get-evalhub-route
+    confidence: inferred
+    description: Get the EvalHub service route
+    action:
+      type: query
+      command: "oc get route -n {{ project_namespace }} -l app={{ evalhub_instance_name }} -o jsonpath='{.items[0].spec.host}' 2>/dev/null"
+      store_as: evalhub_host
+    post_check:
+      assert: evalhub_host is not empty
+      command: "oc get route -n {{ project_namespace }} -l app={{ evalhub_instance_name }} -o jsonpath='{.items[0].spec.host}'"
+      expected_min: 1
+      timeout: "60s"
+      on_fail: STOP
+
+  - id: get-cluster-token
+    confidence: doc-derived
+    description: Get current user token for API authentication
+    action:
+      type: query
+      command: "oc whoami -t"
+      store_as: oc_token
+    post_check:
+      assert: oc_token is not empty
+      command: "oc whoami -t"
+      expected_min: 1
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: create-evaluation-job
+    confidence: doc-derived
+    description: POST evaluation job to EvalHub REST API with MLflow experiment
+    action:
+      type: api_call
+      method: POST
+      url: "https://{{ evalhub_host }}/api/v1/evaluations/jobs"
+      headers:
+        X-Tenant: "{{ project_namespace }}"
+        Content-Type: "application/json"
+        Authorization: "Bearer {{ oc_token }}"
+      body: |
+        {
+          "name": "{{ mlflow_experiment_name }}",
+          "description": "Evaluation run created by ODH assistant",
+          "model": {
+            "name": "{{ model_name }}",
+            "url": "{{ model_url }}"
+          },
+          "benchmarks": [{
+            "id": "arc_easy",
+            "provider_id": "{{ benchmark_provider }}",
+            "primary_score": {
+              "metric": "acc_norm",
+              "lower_is_better": false
+            },
+            "pass_criteria": { "threshold": 0.25 }
+          }],
+          "experiment": {
+            "name": "{{ mlflow_experiment_name }}",
+            "tags": [
+              { "key": "created_by", "value": "odh-assistant" },
+              { "key": "model", "value": "{{ model_name }}" }
+            ]
+          }
+        }
+      store_response_as: eval_job
+    post_check:
+      assert: eval_job is not empty
+      command: "echo 'job submitted'"
+      expected: "job submitted"
+      timeout: "30s"
+      on_fail: STOP
+
+  - id: wait-evaluation-complete
+    confidence: doc-derived
+    description: Poll evaluation job until completed or failed (max 30 minutes)
+    action:
+      type: poll
+      url: "https://{{ evalhub_host }}/api/v1/evaluations/jobs/{{ eval_job.resource.id }}"
+      headers:
+        X-Tenant: "{{ project_namespace }}"
+        Authorization: "Bearer {{ oc_token }}"
+      until: "response.status.state in ['completed', 'failed', 'cancelled']"
+      timeout: "1800s"
+      poll_interval: "30s"
+    post_check:
+      assert: response.status.state == "completed"
+      command: "echo 'checking eval job state'"
+      expected: "checking eval job state"
+      timeout: "10s"
+      on_fail: STOP
+
+  # ── PHASE 6: Return result ────────────────────────────────────────────────
+
+  - id: return-result
+    confidence: inferred
+    description: Get dashboard URL and return summary
+    action:
+      type: query
+      command: "oc get route rhods-dashboard -n redhat-ods-applications -o jsonpath='{.spec.host}' 2>/dev/null"
+      store_as: dashboard_host
+    post_check:
+      command: "oc get route rhods-dashboard -n redhat-ods-applications -o jsonpath='{.spec.host}'"
+      expected_min: 1
+      timeout: "10s"
+      on_fail: STOP
+    return: |
+      ✓ EvalHub evaluation run created successfully.
+
+      Namespace:     {{ project_namespace }}
+      Model:         {{ model_name }} ({{ model_url }})
+      Experiment:    {{ mlflow_experiment_name }}
+
+      Dashboard:     https://{{ dashboard_host }}/projects/{{ project_namespace }}/evalHub
+      EvalHub API:   https://{{ evalhub_host }}/docs
+
+known_bad_patterns:
+  - "never create a TrustyAIService CR — EvalHub uses EvalHub CR (trustyai.opendatahub.io/v1alpha1), not TrustyAIService"
+  - "never patch the InferenceService if it fails to load — surface the error and stop, let the user fix the model URI"
+  - "never skip the post_check to save time — always verify before proceeding"
+  - "never create resources directly in redhat-ods-applications — use the project namespace"
+  - "never retry a failed evaluation job with different params — stop and report"
+  - "never use kubectl instead of oc on OpenShift — they behave differently for auth"
+
+rollback_order:
+  - "oc delete evalhub {{ evalhub_instance_name }} -n {{ project_namespace }}"
+  - "oc delete inferenceservice {{ model_name }} -n {{ project_namespace }}"
+  - "oc delete role eval-hub-user-access -n {{ project_namespace }}"
+  - "oc delete rolebinding eval-hub-user-access -n {{ project_namespace }}"
+  - "oc delete sa eval-hub-job -n {{ project_namespace }}"
+
+tags: ["evalhub", "mlflow", "model-serving", "trustyai"]
+estimated_minutes: 20
+next_steps:
+  - "Check results in dashboard: Projects → {{ project_namespace }} → EvalHub"
+  - "View MLflow experiment: odh run mlflow/log-training-run to log more runs"
+  - "Run a safety evaluation: odh run evalhub/create-evaluation-run -p benchmark_provider=garak"
+  - "Register the model: odh run model-registry/register-model"

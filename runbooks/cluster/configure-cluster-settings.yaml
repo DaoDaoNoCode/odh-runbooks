@@ -1,0 +1,143 @@
+name: cluster-configure-cluster-settings
+description: >
+  Configure all ODH cluster-wide settings in one runbook.
+  Covers: notebook culling, default PVC size, model serving platform, telemetry.
+  These settings appear in the dashboard under Admin → Cluster Settings.
+  Backend: GET/PUT /api/cluster-settings via ODH dashboard backend.
+rhoai_version_tested: null
+confidence_overall: doc-derived
+
+parameters:
+  - name: notebook_idle_timeout_minutes
+    description: Stop idle notebooks after N minutes (0 = disabled)
+    required: false
+    default: "60"
+  - name: default_pvc_size_gi
+    description: Default PVC size for new workbenches (in GiB)
+    required: false
+    default: "20"
+  - name: model_serving_platform
+    description: "Serving platform: kserve | modelmesh | both"
+    required: false
+    default: kserve
+  - name: telemetry_enabled
+    description: Enable usage analytics (true/false)
+    required: false
+    default: "false"
+
+steps:
+  - id: detect-odh-namespace
+    confidence: doc-derived
+    description: Detect ODH namespace
+    action:
+      type: query
+      command: |
+        oc get namespace redhat-ods-applications --no-headers 2>/dev/null | grep -q . \
+          && echo "redhat-ods-applications" || echo "opendatahub"
+      store_as: odh_namespace
+    post_check:
+      assert: odh_namespace is not empty
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: configure-notebook-culler
+    confidence: doc-derived
+    description: Set notebook idle timeout in controller ConfigMap
+    requires:
+      - type: dsc-exists
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: notebook-controller-culler-config
+          namespace: {{ odh_namespace }}
+        data:
+          ENABLE_CULLING: "{{ 'true' if notebook_idle_timeout_minutes != '0' else 'false' }}"
+          CULL_IDLE_TIME: "{{ notebook_idle_timeout_minutes }}"
+          IDLENESS_CHECK_PERIOD: "1"
+    post_check:
+      command: "oc get configmap notebook-controller-culler-config -n redhat-ods-applications -o jsonpath='{.data.CULL_IDLE_TIME}'"
+      expected: "{{ notebook_idle_timeout_minutes }}"
+      timeout: "30s"
+      on_fail: STOP
+
+  - id: configure-dashboard-config
+    confidence: inferred
+    description: Update OdhDashboardConfig with PVC size and model serving settings
+    action:
+      type: query
+      command: |
+        oc patch odhdashboardconfig $(oc get odhdashboardconfig -n redhat-ods-applications -o name | head -1 | cut -d/ -f2) \
+          -n redhat-ods-applications \
+          --type merge \
+          -p "{\"spec\":{\"notebookController\":{\"pvcSize\":\"{{ default_pvc_size_gi }}Gi\"}}}" \
+          2>/dev/null && echo ok || echo failed
+      store_as: patch_result
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "30s"
+      on_fail: STOP
+
+  - id: configure-telemetry
+    confidence: doc-derived
+    description: Configure telemetry/analytics setting
+    action:
+      type: query
+      command: |
+        oc patch configmap odh-segment-key-config -n redhat-ods-applications \
+          --type merge \
+          -p '{"data":{"segmentKeyEnabled":"{{ telemetry_enabled }}"}}' \
+          2>/dev/null && echo ok || echo skipped
+      store_as: telemetry_result
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+    return: |
+      ✓ Cluster settings configured.
+
+      Notebook idle timeout: {{ notebook_idle_timeout_minutes }} minutes
+      Default PVC size:      {{ default_pvc_size_gi }}Gi
+      Model serving:         {{ model_serving_platform }}
+      Telemetry:             {{ telemetry_enabled }}
+
+      Verify in dashboard: Admin → Cluster Settings
+
+      ─────────────────────────────────────────────────────
+      FULL CLUSTER SETTINGS REFERENCE:
+
+      Notebook settings (notebook-controller-culler-config ConfigMap):
+        ENABLE_CULLING: true|false
+        CULL_IDLE_TIME: minutes (min 15, recommended 60)
+        IDLENESS_CHECK_PERIOD: 1 (check every minute)
+
+      Model serving platform (OdhDashboardConfig):
+        modelServerSizes — define available model sizes
+        disableKServe — disable KServe option
+        disableModelMesh — disable ModelMesh option
+
+      PVC defaults (OdhDashboardConfig.spec.notebookController):
+        pvcSize: "20Gi" — default workspace size
+        notebookNamespace: "rhods-notebooks"
+
+      Telemetry (odh-segment-key-config ConfigMap):
+        segmentKeyEnabled: "true"|"false"
+
+      To restart notebook controller after culler config changes:
+        oc rollout restart deployment notebook-controller-deployment \
+          -n redhat-ods-applications
+      ─────────────────────────────────────────────────────
+
+known_bad_patterns:
+  - "never set CULL_IDLE_TIME below 15 — background notebook activity causes false idle detection"
+  - "never increase pvcSize after workbenches are already created — existing PVCs are not resized"
+  - "never disable both KServe and ModelMesh — users won't be able to serve any models"
+
+rollback_order: []

@@ -1,0 +1,257 @@
+name: mlflow-enable-mlflow
+description: >
+  Enable MLflow on RHOAI/ODH using the official MLflow Operator.
+  CORRECT APPROACH (RHOAI 3.2+): Enable mlflowoperator in DSC, then create an MLflow CR.
+  The MLflow CR is CLUSTER-SCOPED — there is only ONE MLflow server per cluster.
+  The server runs in redhat-ods-applications (RHOAI) or opendatahub (ODH) — NOT user projects.
+  Users target a workspace (their project namespace) via MLFLOW_WORKSPACE env var.
+
+  WRONG APPROACH (what NOT to do): Creating a Deployment manually in a user namespace.
+  The operator manages lifecycle, routing through data-science-gateway, and RBAC automatically.
+
+  SDK Auth:
+    RHOAI 3.4+:       MLFLOW_TRACKING_AUTH=kubernetes (auto-detects token + workspace)
+    RHOAI 3.2/3.3:    MLFLOW_TRACKING_TOKEN=$(oc whoami --show-token) + MLFLOW_WORKSPACE=<ns>
+
+  Source: devtools/Summit-on-ROSA/mlflow/
+rhoai_version_tested: "3.4+"
+confidence_overall: doc-derived
+
+parameters:
+  - name: project_namespace
+    description: Your Data Science Project namespace (this becomes the MLflow workspace)
+    required: true
+    discover_cmd: "oc get namespace -l opendatahub.io/dashboard=true --no-headers -o jsonpath='{.items[*].metadata.name}'"
+    hint: "This is your workspace — MLflow experiments in this namespace are isolated via RBAC. The MLflow server itself runs in the ODH operator namespace."
+    example: "my-data-science-project"
+  - name: storage_size
+    description: PVC size for MLflow SQLite database and file artifacts
+    required: false
+    default: "10Gi"
+    hint: "10Gi is enough for hundreds of experiments. Increase for large artifact storage."
+    enum: ["5Gi", "10Gi", "20Gi", "50Gi", "100Gi"]
+  - name: mlflow_sdk_user
+    description: "Your OpenShift username for SDK write access (run: oc whoami)"
+    required: false
+    default: ""
+    discover_cmd: "oc whoami"
+    hint: "Leave empty to skip SDK RBAC setup. Run 'oc whoami' to get your username. Without this, SDK calls may fail with 403."
+    example: "your-username"
+
+steps:
+  - id: enable-mlflow-in-dsc
+    confidence: doc-derived
+    description: >
+      Enable mlflowoperator in DataScienceCluster.
+      Note: the field is 'mlflowoperator' (confirmed from deploy.sh which patches the DSC).
+      This is different from just 'mlflow'.
+    requires:
+      - type: dsc-exists
+      - type: namespace
+        name: "{{ project_namespace }}"
+    pre_check:
+      command: "oc get dsc -o jsonpath='{.items[0].spec.components.mlflowoperator.managementState}' 2>/dev/null"
+      expected: "Managed"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: patch
+      target: "$(oc get dsc -o name | head -1)"
+      patch: '{"spec":{"components":{"mlflowoperator":{"managementState":"Managed"}}}}'
+      dry_run: false
+    post_check:
+      command: "oc get dsc -o jsonpath='{.items[0].spec.components.mlflowoperator.managementState}' 2>/dev/null"
+      expected: "Managed"
+      timeout: "30s"
+      on_fail: STOP
+
+  - id: wait-mlflow-crd-registered
+    confidence: doc-derived
+    description: >
+      Wait for the MLflow CRD to be registered by the operator.
+      The operator registers: mlflows.mlflow.opendatahub.io
+    action:
+      type: wait
+      command: "oc wait dsc --all --for=condition=Ready --timeout=300s 2>/dev/null || sleep 10"
+    post_check:
+      command: "oc get crd mlflows.mlflow.opendatahub.io --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "300s"
+      poll_interval: "15s"
+      on_fail: STOP
+
+  - id: detect-odh-namespace
+    confidence: doc-derived
+    description: >
+      Detect ODH operator namespace.
+      MLflow server pod runs in this namespace, not in user project.
+    action:
+      type: query
+      command: |
+        oc get namespace redhat-ods-applications --no-headers 2>/dev/null | grep -q . \
+          && echo "redhat-ods-applications" || echo "opendatahub"
+      store_as: odh_namespace
+    post_check:
+      assert: odh_namespace is not empty
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: create-mlflow-cr
+    confidence: doc-derived
+    description: >
+      Create the cluster-scoped MLflow CR.
+      This is THE correct resource — not a Deployment.
+      apiVersion: mlflow.opendatahub.io/v1 Kind: MLflow
+      The operator deploys the server pod in redhat-ods-applications/opendatahub.
+      SQLite backend + file artifact store (sufficient for dev/test).
+      Source: devtools/Summit-on-ROSA/mlflow/manifests/mlflow-cr.yaml
+    pre_check:
+      command: "oc get mlflow mlflow --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: false
+      manifest: |
+        apiVersion: mlflow.opendatahub.io/v1
+        kind: MLflow
+        metadata:
+          name: mlflow
+        spec:
+          storage:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: {{ storage_size }}
+          backendStoreUri: "sqlite:////mlflow/mlflow.db"
+          artifactsDestination: "file:///mlflow/artifacts"
+          serveArtifacts: true
+          image:
+            imagePullPolicy: Always
+    post_check:
+      command: "oc get mlflow mlflow --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "30s"
+      on_fail: STOP
+    rollback: "oc delete mlflow mlflow 2>/dev/null || true"
+
+  - id: wait-mlflow-pod-ready
+    confidence: doc-derived
+    description: Wait for MLflow server pod to be Running in the ODH namespace
+    action:
+      type: wait
+      command: "oc wait pod -l app=mlflow -n {{ odh_namespace }} --for=condition=Ready --timeout=300s 2>/dev/null || sleep 10"
+    post_check:
+      command: "oc get pod -l app=mlflow -n {{ odh_namespace }} --no-headers 2>/dev/null | grep -c Running || echo 0"
+      expected_min: 1
+      timeout: "300s"
+      poll_interval: "15s"
+      on_fail: STOP
+
+  - id: grant-sdk-access
+    confidence: doc-derived
+    description: >
+      Grant the specified user edit access to the project namespace (workspace).
+      Required for MLflow SDK to create experiments and log runs.
+      The workspace is the user's project namespace — MLflow data is scoped there via RBAC.
+    pre_check:
+      command: "[ -n '{{ mlflow_sdk_user }}' ] && echo needed || echo skip"
+      expected: "needed"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: false
+      manifest: |
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: RoleBinding
+        metadata:
+          name: mlflow-write-access
+          namespace: {{ project_namespace }}
+        roleRef:
+          apiGroup: rbac.authorization.k8s.io
+          kind: ClusterRole
+          name: edit
+        subjects:
+          - kind: User
+            name: "{{ mlflow_sdk_user }}"
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: get-mlflow-tracking-uri
+    confidence: doc-derived
+    description: >
+      Get the MLflow tracking URI from the data-science-gateway route.
+      MLflow is exposed at /mlflow path under the data-science-gateway route.
+    action:
+      type: query
+      command: |
+        # Try openshift-ingress first, then ODH namespace
+        GATEWAY_HOST=$(oc get route data-science-gateway -n openshift-ingress -o jsonpath='{.spec.host}' 2>/dev/null || \
+                       oc get route data-science-gateway -n {{ odh_namespace }} -o jsonpath='{.spec.host}' 2>/dev/null || \
+                       echo "")
+        if [ -n "$GATEWAY_HOST" ]; then
+          echo "https://${GATEWAY_HOST}/mlflow"
+        else
+          echo "route-not-found"
+        fi
+      store_as: mlflow_tracking_uri
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "15s"
+      on_fail: STOP
+    return: |
+      ✓ MLflow enabled using the official MLflow Operator.
+
+      Tracking URI:    {{ mlflow_tracking_uri }}
+      Storage:         {{ storage_size }} PVC (SQLite + file artifacts)
+      Server location: {{ odh_namespace }} (managed by operator)
+      Workspace:       {{ project_namespace }} (your data science project)
+
+      ──────────────────────────────────────────────────────────────
+      SDK USAGE:
+
+      RHOAI 3.4+ (recommended):
+        pip install mlflow  # or the RH fork
+        export MLFLOW_TRACKING_URI="{{ mlflow_tracking_uri }}"
+        export MLFLOW_TRACKING_AUTH=kubernetes   # auto-detects token + workspace
+        export MLFLOW_WORKSPACE={{ project_namespace }}
+        import mlflow
+        mlflow.set_experiment("my-experiment")
+
+      RHOAI 3.2/3.3 (token-based):
+        export MLFLOW_TRACKING_URI="{{ mlflow_tracking_uri }}"
+        export MLFLOW_TRACKING_TOKEN=$(oc whoami --show-token)
+        export MLFLOW_WORKSPACE={{ project_namespace }}
+
+      KEY CONCEPTS:
+        - One MLflow server per cluster (cluster-scoped CR)
+        - Server runs in {{ odh_namespace }}, not in your project
+        - Workspace = your project namespace (experiments scoped by RBAC)
+        - Dashboard: click MLflow tile in RHOAI dashboard if enabled
+      ──────────────────────────────────────────────────────────────
+
+known_bad_patterns:
+  - "CRITICAL: never deploy MLflow as a standalone Deployment — use the MLflow Operator CR (apiVersion: mlflow.opendatahub.io/v1 Kind: MLflow)"
+  - "CRITICAL: the MLflow CR is cluster-scoped — never put it in a namespace, never create multiple MLflow CRs"
+  - "never deploy MLflow server pod directly into the user project namespace — the operator handles deployment in the ODH namespace"
+  - "never use service account tokens with RHOAI 3.2/3.3 (RHOAIENG-42019 bug) — use user account tokens with oc whoami --show-token"
+  - "if mlflow tracking URI is /mlflow path: it's behind data-science-gateway, not the old standalone route"
+
+rollback_order:
+  - "oc delete mlflow mlflow 2>/dev/null || true"
+  - "oc patch $(oc get dsc -o name | head -1) --type merge -p '{\"spec\":{\"components\":{\"mlflowoperator\":{\"managementState\":\"Removed\"}}}}'"
+
+tags: ["mlflow","setup"]
+estimated_minutes: 5
+next_steps:
+  - "Log a training run: odh wizard mlflow/log-training-run"
+  - "Register a model: odh wizard mlflow/register-model-from-run"

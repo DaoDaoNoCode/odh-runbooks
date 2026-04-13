@@ -1,0 +1,232 @@
+name: pipelines-write-kfp-component
+description: >
+  Reference runbook showing how to write KFP v2 components and pipelines correctly.
+  This is a guide/template runbook — it generates example Python files rather than
+  applying K8s resources. Run this to get a correct, working pipeline scaffold.
+  KFP SDK v2 produces IR YAML (not Argo/Tekton YAML).
+rhoai_version_tested: null
+confidence_overall: doc-derived
+
+parameters:
+  - name: output_dir
+    description: Local directory to write pipeline files to
+    required: false
+    default: "./my-pipeline"
+  - name: pipeline_name
+    description: Name for the pipeline
+    required: true
+
+steps:
+  - id: create-output-dir
+    confidence: doc-derived
+    description: Create output directory for pipeline files
+    pre_check:
+      command: "test -d {{ output_dir }} && echo exists || echo missing"
+      expected: "missing"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: query
+      command: "mkdir -p {{ output_dir }} && echo created"
+      store_as: dir_result
+    post_check:
+      command: "test -d {{ output_dir }} && echo ok"
+      expected: "ok"
+      timeout: "5s"
+      on_fail: STOP
+
+  - id: write-component-file
+    confidence: doc-derived
+    description: Write example KFP v2 component definitions
+    action:
+      type: apply
+      dry_run: false
+      manifest: ""
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "5s"
+      on_fail: STOP
+    return: |
+      ✓ KFP v2 Pipeline Reference Generated.
+
+      Install SDK: pip install kfp==2.* model-registry mlflow
+
+      ════════════════════════════════════════════════════════
+      COMPONENT PATTERNS (save as components.py):
+      ════════════════════════════════════════════════════════
+
+      from kfp import dsl
+      from kfp.dsl import Dataset, Model, Metrics, Input, Output, ClassificationMetrics
+
+      # ── Lightweight Python component ─────────────────────
+      @dsl.component(
+          base_image="quay.io/opendatahub/workbench-images:jupyter-datascience-ubi9-python-3.12-latest",
+          packages_to_install=["scikit-learn==1.4.0", "pandas", "mlflow"]
+      )
+      def train_model(
+          training_data: Input[Dataset],
+          trained_model: Output[Model],
+          metrics_out: Output[Metrics],
+          learning_rate: float = 0.001,
+          n_estimators: int = 100,
+          mlflow_tracking_uri: str = "",
+      ) -> float:
+          import pandas as pd
+          from sklearn.ensemble import RandomForestClassifier
+          from sklearn.model_selection import train_test_split
+          import pickle, mlflow, json
+
+          df = pd.read_csv(training_data.path)
+          X, y = df.drop("target", axis=1), df["target"]
+          X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+
+          if mlflow_tracking_uri:
+              mlflow.set_tracking_uri(mlflow_tracking_uri)
+              mlflow.start_run()
+              mlflow.log_params({"learning_rate": learning_rate, "n_estimators": n_estimators})
+
+          model = RandomForestClassifier(n_estimators=n_estimators)
+          model.fit(X_train, y_train)
+          accuracy = model.score(X_test, y_test)
+
+          # Save model artifact
+          with open(trained_model.path, "wb") as f:
+              pickle.dump(model, f)
+          trained_model.metadata["framework"] = "sklearn"
+          trained_model.metadata["accuracy"] = str(accuracy)
+
+          # Log metrics artifact
+          metrics_out.log_metric("accuracy", accuracy)
+
+          if mlflow_tracking_uri:
+              mlflow.log_metric("accuracy", accuracy)
+              mlflow.sklearn.log_model(model, "model")
+              mlflow.end_run()
+
+          return accuracy
+
+      # ── Data loading component ────────────────────────────
+      @dsl.component(base_image="python:3.12", packages_to_install=["pandas", "boto3"])
+      def load_data(
+          s3_bucket: str,
+          s3_key: str,
+          output_dataset: Output[Dataset],
+      ):
+          import boto3, os
+          s3 = boto3.client("s3",
+              endpoint_url=os.environ.get("AWS_S3_ENDPOINT"),
+              aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID"),
+              aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY"),
+          )
+          s3.download_file(s3_bucket, s3_key, output_dataset.path)
+          output_dataset.metadata["source"] = f"s3://{s3_bucket}/{s3_key}"
+
+      # ── Evaluation component ──────────────────────────────
+      @dsl.component(base_image="python:3.12", packages_to_install=["scikit-learn", "pandas"])
+      def evaluate_model(
+          test_data: Input[Dataset],
+          model_in: Input[Model],
+          metrics_out: Output[ClassificationMetrics],
+          threshold: float = 0.8,
+      ) -> bool:
+          import pickle, pandas as pd
+          df = pd.read_csv(test_data.path)
+          with open(model_in.path, "rb") as f:
+              model = pickle.load(f)
+          X, y = df.drop("target", axis=1), df["target"]
+          preds = model.predict(X)
+          acc = (preds == y).mean()
+
+          # Confusion matrix for UI visualization
+          from sklearn.metrics import confusion_matrix
+          cm = confusion_matrix(y, preds)
+          metrics_out.log_confusion_matrix(
+              categories=list(model.classes_.astype(str)),
+              matrix=cm.tolist()
+          )
+          return acc >= threshold
+
+      ════════════════════════════════════════════════════════
+      PIPELINE DEFINITION (save as pipeline.py):
+      ════════════════════════════════════════════════════════
+
+      from kfp import dsl, compiler
+      from components import load_data, train_model, evaluate_model
+
+      @dsl.pipeline(
+          name="{{ pipeline_name }}",
+          description="Train, evaluate, and conditionally register model"
+      )
+      def {{ pipeline_name | replace("-", "_") }}(
+          s3_bucket: str = "my-bucket",
+          s3_data_key: str = "data/train.csv",
+          learning_rate: float = 0.001,
+          n_estimators: int = 100,
+          accuracy_threshold: float = 0.8,
+          mlflow_tracking_uri: str = "",
+      ):
+          # Step 1: Load data
+          data_task = load_data(s3_bucket=s3_bucket, s3_key=s3_data_key)
+          data_task.set_cpu_limit("1").set_memory_limit("2Gi")
+
+          # Step 2: Train model
+          train_task = train_model(
+              training_data=data_task.outputs["output_dataset"],
+              learning_rate=learning_rate,
+              n_estimators=n_estimators,
+              mlflow_tracking_uri=mlflow_tracking_uri,
+          )
+          train_task.set_cpu_limit("4").set_memory_limit("8Gi")
+
+          # Step 3: Evaluate (conditional on training success)
+          eval_task = evaluate_model(
+              test_data=data_task.outputs["output_dataset"],
+              model_in=train_task.outputs["trained_model"],
+              threshold=accuracy_threshold,
+          )
+
+          # Step 4: Conditional — only deploy if accuracy meets threshold
+          with dsl.If(eval_task.output == True, name="accuracy-check"):
+              deploy_task = deploy_model(
+                  model_in=train_task.outputs["trained_model"]
+              )
+
+      # Compile to IR YAML
+      if __name__ == "__main__":
+          compiler.Compiler().compile({{ pipeline_name | replace("-", "_") }}, "pipeline.yaml")
+          print("Compiled to pipeline.yaml — upload via: odh run pipelines/compile-and-submit-pipeline")
+
+      ════════════════════════════════════════════════════════
+      RESOURCE ALLOCATION PATTERNS:
+      ════════════════════════════════════════════════════════
+
+      # CPU-only:
+      task.set_cpu_limit("4").set_memory_limit("8Gi")
+
+      # GPU:
+      task.set_accelerator_type("nvidia.com/gpu").set_accelerator_limit(1)
+      task.set_memory_limit("24Gi")
+
+      # Disable caching for this step:
+      task.set_caching_options(enable_caching=False)
+
+      # Set node selector:
+      from kfp import dsl
+      task.add_node_selector_constraint("node-role.kubernetes.io/gpu", "")
+
+      # Toleration:
+      from kubernetes.client.models import V1Toleration
+      task.add_toleration(V1Toleration(
+          key="nvidia.com/gpu", operator="Exists", effect="NoSchedule"
+      ))
+
+known_bad_patterns:
+  - "never use @component(func=fn) style — use @dsl.component decorator directly"
+  - "never pass large DataFrames as parameters — use Output[Dataset] artifacts"
+  - "never import heavy libraries at the top of a component function — all imports must be inside the function body for lightweight components"
+  - "never use absolute local file paths in components — all I/O goes through artifact paths (/tmp/outputs/...)"
+  - "never compile with type_check=False — it hides input/output type mismatches that will fail at runtime"
+  - "never use kfp v1 (kfp.dsl.ContainerOp) — it is incompatible with DSP 2.x"
+
+rollback_order: []

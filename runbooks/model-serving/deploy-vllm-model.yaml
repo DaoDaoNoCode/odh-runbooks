@@ -1,0 +1,237 @@
+name: model-serving-deploy-vllm-model
+description: >
+  Deploy an LLM using vLLM serving runtime on KServe.
+  vLLM is the recommended runtime for LLMs on RHOAI — it supports continuous batching,
+  paged attention, and OpenAI-compatible API (/v1/chat/completions).
+  Requires a GPU node. Model must be in HuggingFace format on S3 or HuggingFace Hub.
+rhoai_version_tested: null
+confidence_overall: inferred
+
+parameters:
+  - name: project_namespace
+    description: Project namespace to deploy the model in
+    required: true
+    discover_cmd: "oc get namespace -l opendatahub.io/dashboard=true --no-headers -o jsonpath='{.items[*].metadata.name}'"
+    hint: "Must be an ODH Data Science Project"
+    example: "my-data-science-project"
+  - name: model_name
+    description: Name for the InferenceService (shown in dashboard)
+    required: true
+    example: "llama3-8b"
+    hint: "Lowercase letters, numbers, hyphens only. Max 63 chars. This becomes the Kubernetes resource name."
+  - name: model_uri
+    description: Path within the S3 bucket to the model weights directory
+    required: true
+    example: "models/llama3-8b"
+    hint: "PATH within the bucket only (not the full s3:// URL). The S3 connection provides the bucket/credentials. For HuggingFace models, first download to S3."
+  - name: s3_connection_name
+    description: S3 connection secret name in the project
+    required: false
+    default: ""
+    discover_cmd: "oc get secret -n {project_namespace} -l opendatahub.io/connection-type=s3 --no-headers -o jsonpath='{.items[*].metadata.name}' 2>/dev/null"
+    hint: "Leave empty to auto-discover the first S3 connection in the namespace"
+  - name: gpu_count
+    description: "Number of GPUs (use >1 for tensor parallelism with large models)"
+    required: false
+    default: "1"
+    enum: ["1", "2", "4", "8"]
+    hint: "g4dn.2xlarge=1 GPU, g4dn.12xlarge=4 GPUs, g5.12xlarge=4 GPUs. Must match your node type."
+  - name: memory_request
+    description: "Memory request. Rule of thumb: ~2x model size (7B model ≈ 16Gi, 70B model ≈ 140Gi)"
+    required: false
+    default: "24Gi"
+    hint: "For Llama 3 8B: 16-24Gi. For Llama 3 70B: 140Gi (needs multiple GPUs)."
+    example: "24Gi"
+  - name: max_model_len
+    description: Maximum context window length in tokens
+    required: false
+    default: "4096"
+    hint: "Reduce if you get CUDA OOM errors. Common values: 2048, 4096, 8192, 16384."
+
+steps:
+  - id: check-gpu-available
+    confidence: inferred
+    description: Verify GPU nodes are available
+    requires:
+      - type: kserve-enabled
+      - type: namespace
+        name: "{{ project_namespace }}"
+      - type: gpu-available
+        can_auto_resolve: false
+        blocker_message: "GPU nodes required for vLLM. Run: odh run gpu/add-gpu-node-ocm"
+      - type: gpu-operator-installed
+      - type: s3-connection
+        namespace: "{{ project_namespace }}"
+    pre_check:
+      command: "oc get nodes -o jsonpath='{.items[*].status.allocatable.nvidia\\.com/gpu}' | tr ' ' '\\n' | grep -v '^0$' | grep -v '^$' | wc -l | tr -d ' '"
+      expected_min: 1
+      on_fail: STOP
+    action:
+      type: none
+    post_check:
+      command: "oc get nodes -o jsonpath='{.items[*].status.allocatable.nvidia\\.com/gpu}' | tr ' ' '\\n' | grep -v '^0$' | grep -v '^$' | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: create-vllm-serving-runtime
+    confidence: inferred
+    description: >
+      Create vLLM ServingRuntime matching the dashboard format.
+      REQUIRED: opendatahub.io/dashboard=true label for dashboard visibility.
+      REQUIRED: openshift.io/display-name annotation (dashboard always sets it).
+      REQUIRED: /dev/shm volume with 2Gi Memory (dashboard always injects this).
+    pre_check:
+      command: "oc get servingruntime vllm-runtime -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: serving.kserve.io/v1alpha1
+        kind: ServingRuntime
+        metadata:
+          name: vllm-runtime
+          namespace: {{ project_namespace }}
+          labels:
+            opendatahub.io/dashboard: "true"
+          annotations:
+            openshift.io/display-name: "vLLM"
+            opendatahub.io/template-display-name: "vLLM ServingRuntime for KServe"
+        spec:
+          builtInAdapter:
+            serverType: ovms
+          containers:
+            - name: kserve-container
+              image: quay.io/opendatahub/vllm:stable
+              command:
+                - python
+                - -m
+                - vllm.entrypoints.openai.api_server
+              args:
+                - "--port=8080"
+                - "--model=/mnt/models"
+                - "--served-model-name={{ model_name }}"
+                - "--max-model-len={{ max_model_len }}"
+                - "--tensor-parallel-size={{ gpu_count }}"
+              env:
+                - name: HF_HOME
+                  value: /tmp/hf_home
+              ports:
+                - containerPort: 8080
+                  protocol: TCP
+              resources:
+                requests:
+                  cpu: "4"
+                  memory: "{{ memory_request }}"
+                  nvidia.com/gpu: "{{ gpu_count }}"
+                limits:
+                  cpu: "8"
+                  memory: "{{ memory_request }}"
+                  nvidia.com/gpu: "{{ gpu_count }}"
+              volumeMounts:
+                - mountPath: /dev/shm
+                  name: shm
+          multiModel: false
+          supportedModelFormats:
+            - autoSelect: true
+              name: vllm
+          volumes:
+            - name: shm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 2Gi
+    post_check:
+      command: "oc get servingruntime vllm-runtime -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      timeout: "30s"
+      on_fail: STOP
+    rollback: "oc delete servingruntime vllm-runtime -n {{ project_namespace }}"
+
+  - id: deploy-vllm-inference-service
+    confidence: inferred
+    description: >
+      Create InferenceService for vLLM matching EXACTLY what dashboard creates.
+      All required labels/annotations: dashboard=true, display-name, RawDeployment mode.
+    pre_check:
+      command: "oc get inferenceservice {{ model_name }} -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: serving.kserve.io/v1beta1
+        kind: InferenceService
+        metadata:
+          name: {{ model_name }}
+          namespace: {{ project_namespace }}
+          labels:
+            opendatahub.io/dashboard: "true"
+          annotations:
+            serving.kserve.io/deploymentMode: RawDeployment
+            openshift.io/display-name: "{{ model_name }}"
+        spec:
+          predictor:
+            minReplicas: 1
+            model:
+              modelFormat:
+                name: vllm
+              runtime: vllm-runtime
+              storage:
+                key: "{{ s3_connection_name }}"
+                path: "{{ model_uri }}"
+    post_check:
+      command: "oc get inferenceservice {{ model_name }} -n {{ project_namespace }} -o jsonpath='{.status.modelStatus.states.activeModelState}'"
+      expected: "Loaded"
+      timeout: "900s"
+      poll_interval: "30s"
+      on_fail: STOP
+    rollback: "oc delete inferenceservice {{ model_name }} -n {{ project_namespace }}"
+
+  - id: get-vllm-endpoint
+    confidence: inferred
+    description: Get the OpenAI-compatible endpoint URL
+    action:
+      type: query
+      command: "oc get inferenceservice {{ model_name }} -n {{ project_namespace }} -o jsonpath='{.status.url}'"
+      store_as: model_url
+    post_check:
+      assert: model_url is not empty
+      command: "oc get inferenceservice {{ model_name }} -n {{ project_namespace }} -o jsonpath='{.status.url}'"
+      expected_min: 1
+      timeout: "30s"
+      on_fail: STOP
+    return: |
+      ✓ vLLM model deployed: {{ model_name }}
+
+      Endpoint:          {{ model_url }}
+      OpenAI-compatible: {{ model_url }}/v1/chat/completions
+
+      Test it:
+        curl -X POST {{ model_url }}/v1/chat/completions \
+          -H "Content-Type: application/json" \
+          -d '{"model": "{{ model_name }}", "messages": [{"role": "user", "content": "Hello!"}]}'
+
+      Dashboard: Projects → {{ project_namespace }} → Models and model servers
+      GenAI Playground: odh run genai/connect-model-to-playground -p model_url={{ model_url }}
+
+known_bad_patterns:
+  - "never omit the shm volume — vLLM requires shared memory for tensor parallelism"
+  - "never set tensor-parallel-size higher than gpu_count — vLLM will fail to start"
+  - "never set max-model-len higher than the model's actual maximum context — model will fail to load"
+  - "never deploy an LLM without GPU — CPU inference with vLLM is not supported in this configuration"
+  - "never use the kserve-container image without checking the vLLM version — older versions may not support the model architecture"
+
+rollback_order:
+  - "oc delete inferenceservice {{ model_name }} -n {{ project_namespace }}"
+  - "oc delete servingruntime vllm-runtime -n {{ project_namespace }}"
+
+tags: ["llm","gpu","genai"]
+estimated_minutes: 15
+next_steps:
+  - "Test endpoint: odh run model-serving/test-model-endpoint"
+  - "Connect to GenAI playground: odh wizard genai/enable-chat-playground"

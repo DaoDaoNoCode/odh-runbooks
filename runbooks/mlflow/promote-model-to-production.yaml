@@ -1,0 +1,119 @@
+name: mlflow-promote-model-to-production
+description: >
+  Promote an MLflow model version from Staging to Production.
+  Automatically archives the previous Production version.
+  Stage flow: None → Staging → Production → Archived
+  Aliases (newer MLflow): champion, challenger — preferred over stages in MLflow 2.x+
+rhoai_version_tested: null
+confidence_overall: doc-derived
+
+parameters:
+  - name: mlflow_tracking_uri
+    description: MLflow server URL
+    required: true
+  - name: model_name
+    description: Registered model name
+    required: true
+  - name: version
+    description: Version number to promote to Production
+    required: true
+  - name: archive_existing
+    description: Whether to archive the existing Production version
+    required: false
+    default: "true"
+
+steps:
+  - id: verify-version-in-staging
+    confidence: doc-derived
+    description: Verify the model version is currently in Staging
+    pre_check:
+      command: "echo checking"
+      expected: "checking"
+      on_fail: STOP
+    action:
+      type: api_call
+      method: GET
+      url: "{{ mlflow_tracking_uri }}/api/2.0/mlflow/model-versions/get?name={{ model_name }}&version={{ version }}"
+      headers:
+        Content-Type: "application/json"
+      store_response_as: current_version
+    post_check:
+      assert: current_version is not empty
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: transition-to-production
+    confidence: doc-derived
+    description: Transition model version to Production stage
+    action:
+      type: api_call
+      method: POST
+      url: "{{ mlflow_tracking_uri }}/api/2.0/mlflow/model-versions/transition-stage"
+      headers:
+        Content-Type: "application/json"
+      body: |
+        {
+          "name": "{{ model_name }}",
+          "version": "{{ version }}",
+          "stage": "Production",
+          "archive_existing_versions": {{ archive_existing }}
+        }
+      store_response_as: promoted_version
+    post_check:
+      assert: promoted_version is not empty
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: set-production-alias
+    confidence: doc-derived
+    description: Set 'champion' alias pointing to this Production version
+    action:
+      type: api_call
+      method: POST
+      url: "{{ mlflow_tracking_uri }}/api/2.0/mlflow/model-versions/set-alias"
+      headers:
+        Content-Type: "application/json"
+      body: |
+        {
+          "name": "{{ model_name }}",
+          "alias": "champion",
+          "version": "{{ version }}"
+        }
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+    return: |
+      ✓ Model promoted to Production.
+
+      Model:   {{ model_name }}
+      Version: {{ version }}
+      Stage:   Production
+      Alias:   champion
+
+      Load this model in your code:
+        import mlflow
+        mlflow.set_tracking_uri("{{ mlflow_tracking_uri }}")
+        # By alias (recommended):
+        model = mlflow.pyfunc.load_model("models:/{{ model_name }}@champion")
+        # By stage:
+        model = mlflow.pyfunc.load_model("models:/{{ model_name }}/Production")
+        # By version:
+        model = mlflow.pyfunc.load_model("models:/{{ model_name }}/{{ version }}")
+
+      MLflow UI: {{ mlflow_tracking_uri }}/#/models/{{ model_name }}
+
+known_bad_patterns:
+  - "never promote a model that hasn't been validated in Staging — always test first"
+  - "never use archive_existing_versions=false if you want clean single-version Production"
+  - "prefer aliases ('champion', 'challenger') over stages for MLflow 2.x — stages are being deprecated"
+  - "never delete a Production version — archive it instead to preserve audit trail"
+
+rollback_order:
+  - "POST {{ mlflow_tracking_uri }}/api/2.0/mlflow/model-versions/transition-stage with version={{ version }}&stage=Staging"
+  - "POST {{ mlflow_tracking_uri }}/api/2.0/mlflow/model-versions/delete-alias with name={{ model_name }}&alias=champion"

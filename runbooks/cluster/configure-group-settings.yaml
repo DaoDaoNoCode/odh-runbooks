@@ -1,0 +1,114 @@
+name: cluster-configure-group-settings
+description: >
+  Configure which OpenShift groups have admin access and user access to ODH dashboard.
+  Group settings are stored in the Auth CR (opendatahub.io/v1alpha1).
+  Per ADR-Operator-0007: Auth CR replaced the old dashboardConfig.groupsConfig.
+  Admin groups: full dashboard admin. Allowed groups: basic user access.
+rhoai_version_tested: null
+confidence_overall: doc-derived
+
+parameters:
+  - name: admin_groups
+    description: "Comma-separated OpenShift group names for admin access (e.g. 'cluster-admins,ml-admins')"
+    required: false
+    default: "cluster-admins"
+  - name: allowed_groups
+    description: "Comma-separated OpenShift group names for user access (e.g. 'ml-users,data-scientists')"
+    required: false
+    default: "system:authenticated"
+
+steps:
+  - id: list-available-groups
+    confidence: doc-derived
+    description: List all OpenShift groups to verify group names
+    requires:
+      - type: dsc-exists
+    action:
+      type: query
+      command: "oc get groups --no-headers 2>/dev/null | awk '{print $1}' | head -20"
+      store_as: available_groups
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: check-auth-cr-exists
+    confidence: doc-derived
+    description: Check if Auth CR exists (per ADR-Operator-0007)
+    action:
+      type: query
+      command: "oc get auth -n redhat-ods-applications --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      store_as: auth_count
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: detect-odh-namespace
+    confidence: doc-derived
+    description: Detect ODH namespace (redhat-ods-applications for RHOAI, opendatahub for ODH)
+    action:
+      type: query
+      command: |
+        oc get namespace redhat-ods-applications --no-headers 2>/dev/null | grep -q . \
+          && echo "redhat-ods-applications" || echo "opendatahub"
+      store_as: odh_namespace
+    post_check:
+      assert: odh_namespace is not empty
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: configure-auth-groups
+    confidence: doc-derived
+    description: Patch Auth CR with admin and allowed groups (per ADR-Operator-0007)
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: services.platform.opendatahub.io/v1alpha1
+        kind: Auth
+        metadata:
+          name: auth
+          namespace: {{ odh_namespace }}
+        spec:
+          adminGroups:
+            - {{ admin_groups | replace(",", "\n            - ") }}
+          allowedGroups:
+            - {{ allowed_groups | replace(",", "\n            - ") }}
+    post_check:
+      command: "oc get auth -n redhat-ods-applications -o jsonpath='{.items[0].spec.adminGroups}' 2>/dev/null"
+      expected_min: 1
+      timeout: "30s"
+      on_fail: STOP
+    return: |
+      ✓ Group settings configured.
+
+      Admin groups:   {{ admin_groups }}
+      Allowed groups: {{ allowed_groups }}
+
+      Dashboard: Admin → Group Settings → (verify groups shown)
+
+      Available groups on this cluster:
+      {{ available_groups }}
+
+      To create a new OpenShift group and add users:
+        oc adm groups new ml-team
+        oc adm groups add-users ml-team user1 user2 user3
+
+      To grant admin access to a new group:
+        odh run cluster/configure-group-settings \
+          -p admin_groups="cluster-admins,ml-admins" \
+          -p allowed_groups="ml-team,system:authenticated"
+
+known_bad_patterns:
+  - "never remove system:authenticated from allowed_groups unless you want to block all users"
+  - "never add individual users instead of groups — use OpenShift groups for scalable access control"
+  - "never set the same group in both adminGroups and allowedGroups — adminGroups implies allowedGroups"
+  - "never create groups with spaces in names — Kubernetes labels don't support spaces"
+
+rollback_order:
+  - "oc patch auth default-auth -n redhat-ods-applications --type merge -p '{\"spec\":{\"adminGroups\":[\"cluster-admins\"],\"allowedGroups\":[\"system:authenticated\"]}}'"

@@ -1,0 +1,239 @@
+name: workbenches-create-workbench-with-connection
+description: >
+  Create a Jupyter workbench with a pre-mounted S3 data connection.
+  Uses EXACT same spec as create-workbench but injects S3 env vars from a connection secret.
+  All labels/annotations match what the ODH dashboard creates.
+rhoai_version_tested: null
+confidence_overall: doc-derived
+
+parameters:
+  - name: project_namespace
+    description: Project namespace
+    required: true
+  - name: workbench_name
+    description: Name for the workbench
+    required: true
+  - name: image_variant
+    description: "Image variant: datascience | pytorch | tensorflow | minimal | codeserver | trustyai"
+    required: false
+    default: datascience
+  - name: s3_connection_name
+    description: Name of the S3 connection secret to mount (optional — leave empty to skip)
+    required: false
+    default: ""
+  - name: pvc_size
+    description: Storage size for notebook workspace
+    required: false
+    default: "20Gi"
+  - name: cpu_request
+    description: CPU request
+    required: false
+    default: "1"
+  - name: memory_request
+    description: Memory request (use Small=8Gi, Medium=24Gi, Large=56Gi, XLarge=120Gi)
+    required: false
+    default: "8Gi"
+  - name: size_selection
+    description: "Size label: Small | Medium | Large | X Large"
+    required: false
+    default: "Small"
+
+steps:
+  - id: create-pvc
+    confidence: doc-derived
+    description: Create workspace PVC
+    requires:
+      - type: namespace
+        name: "{{ project_namespace }}"
+      - type: storage-class
+    pre_check:
+      command: "oc get pvc {{ workbench_name }} -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: v1
+        kind: PersistentVolumeClaim
+        metadata:
+          name: {{ workbench_name }}
+          namespace: {{ project_namespace }}
+          labels:
+            opendatahub.io/dashboard: "true"
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: {{ pvc_size }}
+    post_check:
+      command: "oc get pvc {{ workbench_name }} -n {{ project_namespace }} -o jsonpath='{.status.phase}'"
+      expected: "Bound"
+      timeout: "120s"
+      poll_interval: "10s"
+      on_fail: STOP
+    rollback: "oc delete pvc {{ workbench_name }} -n {{ project_namespace }}"
+
+  - id: create-notebook
+    confidence: doc-derived
+    description: >
+      Create Notebook CR with correct ODH image and ALL required annotations/labels.
+      inject-auth (not inject-oauth), base_url in NOTEBOOK_ARGS, shm volume, probes.
+    pre_check:
+      command: "oc get notebook {{ workbench_name }} -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: kubeflow.org/v1
+        kind: Notebook
+        metadata:
+          name: {{ workbench_name }}
+          namespace: {{ project_namespace }}
+          labels:
+            app: {{ workbench_name }}
+            opendatahub.io/dashboard: "true"
+            opendatahub.io/odh-managed: "true"
+          annotations:
+            openshift.io/display-name: "{{ workbench_name }}"
+            openshift.io/description: ""
+            notebooks.opendatahub.io/inject-auth: "true"
+            notebooks.opendatahub.io/last-image-selection: "jupyter-{{ image_variant }}-ubi9-python-3.12"
+            notebooks.opendatahub.io/last-size-selection: "{{ size_selection }}"
+        spec:
+          template:
+            spec:
+              enableServiceLinks: false
+              containers:
+                - name: {{ workbench_name }}
+                  image: quay.io/opendatahub/workbench-images:jupyter-{{ image_variant }}-ubi9-python-3.12-latest
+                  imagePullPolicy: Always
+                  workingDir: /opt/app-root/src
+                  ports:
+                    - name: notebook-port
+                      containerPort: 8888
+                      protocol: TCP
+                  env:
+                    - name: NOTEBOOK_ARGS
+                      value: >-
+                        --ServerApp.port=8888
+                        --ServerApp.token=''
+                        --ServerApp.password=''
+                        --ServerApp.base_url=/notebook/{{ project_namespace }}/{{ workbench_name }}
+                        --ServerApp.quit_button=False
+                    - name: JUPYTER_IMAGE
+                      value: "quay.io/opendatahub/workbench-images:jupyter-{{ image_variant }}-ubi9-python-3.12-latest"
+                    - name: AWS_ACCESS_KEY_ID
+                      valueFrom:
+                        secretKeyRef:
+                          name: "{{ s3_connection_name }}"
+                          key: AWS_ACCESS_KEY_ID
+                          optional: true
+                    - name: AWS_SECRET_ACCESS_KEY
+                      valueFrom:
+                        secretKeyRef:
+                          name: "{{ s3_connection_name }}"
+                          key: AWS_SECRET_ACCESS_KEY
+                          optional: true
+                    - name: AWS_S3_ENDPOINT
+                      valueFrom:
+                        secretKeyRef:
+                          name: "{{ s3_connection_name }}"
+                          key: AWS_S3_ENDPOINT
+                          optional: true
+                    - name: AWS_DEFAULT_REGION
+                      valueFrom:
+                        secretKeyRef:
+                          name: "{{ s3_connection_name }}"
+                          key: AWS_DEFAULT_REGION
+                          optional: true
+                    - name: AWS_S3_BUCKET
+                      valueFrom:
+                        secretKeyRef:
+                          name: "{{ s3_connection_name }}"
+                          key: AWS_S3_BUCKET
+                          optional: true
+                  resources:
+                    requests:
+                      cpu: "{{ cpu_request }}"
+                      memory: "{{ memory_request }}"
+                    limits:
+                      cpu: "{{ cpu_request }}"
+                      memory: "{{ memory_request }}"
+                  livenessProbe:
+                    httpGet:
+                      path: /notebook/{{ project_namespace }}/{{ workbench_name }}/api
+                      port: notebook-port
+                      scheme: HTTP
+                    initialDelaySeconds: 10
+                    periodSeconds: 5
+                    timeoutSeconds: 1
+                    successThreshold: 1
+                    failureThreshold: 3
+                  readinessProbe:
+                    httpGet:
+                      path: /notebook/{{ project_namespace }}/{{ workbench_name }}/api
+                      port: notebook-port
+                      scheme: HTTP
+                    initialDelaySeconds: 10
+                    periodSeconds: 5
+                    timeoutSeconds: 1
+                    successThreshold: 1
+                    failureThreshold: 3
+                  volumeMounts:
+                    - name: {{ workbench_name }}
+                      mountPath: /opt/app-root/src
+                    - name: shm
+                      mountPath: /dev/shm
+              volumes:
+                - name: {{ workbench_name }}
+                  persistentVolumeClaim:
+                    claimName: {{ workbench_name }}
+                - name: shm
+                  emptyDir:
+                    medium: Memory
+    post_check:
+      command: "oc get notebook {{ workbench_name }} -n {{ project_namespace }} -o jsonpath='{.status.conditions[?(@.type==\"Running\")].status}'"
+      expected: "True"
+      timeout: "300s"
+      poll_interval: "15s"
+      on_fail: STOP
+    rollback: "oc delete notebook {{ workbench_name }} -n {{ project_namespace }}"
+
+  - id: get-workbench-url
+    confidence: doc-derived
+    description: Get workbench access URL
+    action:
+      type: query
+      command: "oc get route {{ workbench_name }} -n {{ project_namespace }} -o jsonpath='{.spec.host}' 2>/dev/null"
+      store_as: workbench_host
+    post_check:
+      assert: workbench_host is not empty
+      command: "oc get route {{ workbench_name }} -n {{ project_namespace }} -o jsonpath='{.spec.host}'"
+      expected_min: 1
+      timeout: "60s"
+      on_fail: STOP
+    return: |
+      ✓ Workbench created: {{ workbench_name }}
+
+      Image:     jupyter-{{ image_variant }}-ubi9-python-3.12-latest
+      S3 connection: {{ s3_connection_name }} (env vars injected, optional=true)
+
+      Open:  https://{{ workbench_host }}/notebook/{{ project_namespace }}/{{ workbench_name }}
+      Dashboard: Projects → {{ project_namespace }} → Workbenches → {{ workbench_name }} → Open
+
+known_bad_patterns:
+  - "CRITICAL: never use inject-oauth — use inject-auth"
+  - "CRITICAL: NOTEBOOK_ARGS must include --ServerApp.base_url for correct notebook routing"
+  - "never omit the shm volume — dashboard always injects it"
+  - "never omit opendatahub.io/odh-managed: true — dashboard listing depends on it"
+  - "never use a non-ubi9 image without checking ODH compatibility"
+
+rollback_order:
+  - "oc delete notebook {{ workbench_name }} -n {{ project_namespace }}"
+  - "oc delete pvc {{ workbench_name }} -n {{ project_namespace }}"

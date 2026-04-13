@@ -1,0 +1,72 @@
+name: cluster-enable-model-registry
+description: >
+  Enable the ModelRegistry component in DataScienceCluster.
+  After enabling, admins can create ModelRegistry instances from the dashboard settings.
+  Per architecture docs, multiple registries can coexist with separate RBAC.
+rhoai_version_tested: null
+confidence_overall: doc-derived
+
+parameters: []
+
+steps:
+  - id: enable-model-registry-component
+    confidence: doc-derived
+    description: Enable ModelRegistry in DataScienceCluster
+    requires:
+      - type: dsc-exists
+    pre_check:
+      command: "oc get dsc -o jsonpath='{.items[0].spec.components.modelregistry.managementState}'"
+      expected: "Managed"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: patch
+      target: "$(oc get dsc -o name | head -1)"
+      patch: '{"spec":{"components":{"modelregistry":{"managementState":"Managed","registriesNamespace":"odh-model-registries"}}}}'
+      dry_run: false
+    post_check:
+      command: "oc get dsc -o jsonpath='{.items[0].spec.components.modelregistry.managementState}'"
+      expected: "Managed"
+      timeout: "30s"
+      on_fail: STOP
+
+  - id: wait-model-registry-operator-ready
+    confidence: doc-derived
+    description: Wait for DataScienceCluster to reconcile Model Registry component
+    action:
+      type: wait
+      command: "oc wait dsc --all --for=condition=Ready --timeout=300s 2>/dev/null || sleep 10"
+    post_check:
+      command: "oc get crd modelregistries.modelregistry.opendatahub.io --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "300s"
+      poll_interval: "15s"
+      on_fail: STOP
+
+  - id: verify-modelregistry-crd
+    confidence: inferred
+    description: Verify ModelRegistry CRD is installed
+    action:
+      type: query
+      command: "oc get crd modelregistries.modelregistry.opendatahub.io --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      store_as: crd_count
+    post_check:
+      command: "oc get crd modelregistries.modelregistry.opendatahub.io --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected_min: 1
+      timeout: "30s"
+      on_fail: STOP
+    return: |
+      ✓ Model Registry component enabled.
+
+      CRD: modelregistries.modelregistry.opendatahub.io
+      Default namespace: odh-model-registries
+
+      Next step: Create a registry instance
+        odh run model-registry/enable-registry -p registry_name=model-registry
+
+known_bad_patterns:
+  - "never create ModelRegistry CRs before enabling the component — the operator won't be present"
+  - "never delete the odh-model-registries namespace manually — it is managed by the operator"
+
+rollback_order:
+  - "oc patch $(oc get dsc -o name | head -1) --type merge -p '{\"spec\":{\"components\":{\"modelregistry\":{\"managementState\":\"Removed\"}}}}'"

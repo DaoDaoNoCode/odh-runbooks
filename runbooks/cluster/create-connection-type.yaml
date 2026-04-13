@@ -1,0 +1,121 @@
+name: cluster-create-connection-type
+description: >
+  Create a custom Connection Type definition for ODH.
+  EXACT label format from dashboard source (connectionTypeUtils.ts):
+  - Must have BOTH: opendatahub.io/dashboard=true AND opendatahub.io/connection-type=true
+  - Lives in the ODH dashboard namespace (not user project namespace)
+  - ConfigMap data contains the field definitions for the connection form
+  - Dashboard filters by: both labels with value "true"
+rhoai_version_tested: null
+confidence_overall: doc-derived
+
+parameters:
+  - name: odh_namespace
+    description: ODH dashboard namespace (redhat-ods-applications for RHOAI, opendatahub for ODH)
+    required: false
+    default: redhat-ods-applications
+  - name: type_name
+    description: Internal ID for the connection type (lowercase, hyphens)
+    required: true
+  - name: display_name
+    description: Human-readable name shown in the dashboard
+    required: true
+  - name: description
+    description: Description of what this connection type is for
+    required: false
+    default: "Custom connection type"
+
+steps:
+  - id: create-connection-type-configmap
+    confidence: doc-derived
+    description: >
+      Create connection type ConfigMap with EXACT dual-label format that dashboard requires.
+      From connectionTypeUtils.ts: filters require BOTH labels to be exactly "true".
+      Missing either label = connection type won't appear in dashboard.
+    requires:
+      - type: dsc-exists
+    pre_check:
+      command: "oc get configmap {{ type_name }} -n {{ odh_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: {{ type_name }}
+          namespace: {{ odh_namespace }}
+          labels:
+            opendatahub.io/dashboard: "true"
+            opendatahub.io/connection-type: "true"
+          annotations:
+            openshift.io/display-name: "{{ display_name }}"
+            opendatahub.io/description: "{{ description }}"
+            opendatahub.io/enabled: "true"
+        data:
+          category: "Database"
+          fields: |
+            [
+              {
+                "type": "short-text",
+                "name": "HOST",
+                "label": "Host",
+                "required": true,
+                "placeholder": "hostname or IP address"
+              },
+              {
+                "type": "short-text",
+                "name": "PORT",
+                "label": "Port",
+                "required": true,
+                "defaultValue": "5432"
+              },
+              {
+                "type": "short-text",
+                "name": "DATABASE",
+                "label": "Database name",
+                "required": true
+              },
+              {
+                "type": "short-text",
+                "name": "USERNAME",
+                "label": "Username",
+                "required": true
+              },
+              {
+                "type": "masked",
+                "name": "PASSWORD",
+                "label": "Password",
+                "required": true
+              }
+            ]
+    post_check:
+      command: "oc get configmap {{ type_name }} -n {{ odh_namespace }} -o jsonpath='{.metadata.labels.opendatahub\\.io/connection-type}'"
+      expected: "true"
+      timeout: "30s"
+      on_fail: STOP
+    rollback: "oc delete configmap {{ type_name }} -n {{ odh_namespace }}"
+    return: |
+      ✓ Connection type created: {{ display_name }}
+
+      Dashboard: Admin → Connection Types → {{ display_name }}
+      Users see it in: Projects → <project> → Connections → Add connection → {{ display_name }}
+
+      Labels required (BOTH must be "true"):
+        opendatahub.io/dashboard: "true"          ← KnownLabels.DASHBOARD_RESOURCE
+        opendatahub.io/connection-type: "true"    ← KnownLabels.CONNECTION_TYPE
+
+      Available field types: short-text, text, masked, boolean, dropdown, uri
+
+known_bad_patterns:
+  - "CRITICAL: missing opendatahub.io/connection-type=true label — connection type won't appear in dashboard"
+  - "CRITICAL: missing opendatahub.io/dashboard=true label — also required"
+  - "never use app.kubernetes.io/managed-by as a substitute — the dashboard looks for opendatahub.io/dashboard"
+  - "never create connection types in user project namespaces — they must be in the ODH dashboard namespace"
+  - "never put actual credentials in the ConfigMap — connection types define the FORM, not the values"
+
+rollback_order:
+  - "oc delete configmap {{ type_name }} -n {{ odh_namespace }}"

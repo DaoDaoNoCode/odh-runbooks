@@ -1,0 +1,167 @@
+name: automl-run-pipeline
+description: >
+  Run an AutoML pipeline on a tabular dataset using the ODH AutoML package.
+  AutoML uses AutoGluon to automatically discover optimal model configurations.
+  Requires: DSP pipeline server running, S3 data connection, training data in S3.
+  Output: trained model artifact in S3, optionally registered in Model Registry.
+rhoai_version_tested: null
+confidence_overall: inferred
+
+parameters:
+  - name: project_namespace
+    description: Project namespace with running pipeline server
+    required: true
+  - name: s3_connection_name
+    description: S3 connection secret name with training data
+    required: true
+  - name: train_data_s3_path
+    description: "S3 path to training CSV (e.g. s3://bucket/data/train.csv)"
+    required: true
+  - name: label_column
+    description: Name of the target/label column in the dataset
+    required: true
+  - name: task_type
+    description: "ML task: classification | regression | multiclass"
+    required: false
+    default: classification
+  - name: quality_preset
+    description: "AutoGluon preset: best_quality | high_quality | good_quality | medium_quality"
+    required: false
+    default: good_quality
+  - name: time_limit_seconds
+    description: Maximum training time in seconds
+    required: false
+    default: "3600"
+  - name: model_output_path
+    description: S3 path to write trained model artifact
+    required: false
+    default: "s3://{{ s3_connection_name }}/models/automl-output"
+
+steps:
+  - id: check-dspa-ready
+    confidence: doc-derived
+    description: Verify pipeline server is ready
+    requires:
+      - type: dsp-enabled
+      - type: namespace
+        name: "{{ project_namespace }}"
+      - type: pipeline-server
+        namespace: "{{ project_namespace }}"
+      - type: s3-connection
+        namespace: "{{ project_namespace }}"
+    pre_check:
+      command: "oc get dspa -n {{ project_namespace }} -o jsonpath='{.items[0].status.conditions[?(@.type==\"APIServerReady\")].status}'"
+      expected: "True"
+      on_fail: STOP
+    action:
+      type: none
+    post_check:
+      command: "oc get dspa -n {{ project_namespace }} -o jsonpath='{.items[0].status.conditions[?(@.type==\"APIServerReady\")].status}'"
+      expected: "True"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: get-pipeline-api-url
+    confidence: inferred
+    description: Get DSP API server route
+    action:
+      type: query
+      command: "oc get route -n {{ project_namespace }} -l app=ds-pipeline -o jsonpath='{.items[0].spec.host}' 2>/dev/null"
+      store_as: pipeline_api_host
+    post_check:
+      assert: pipeline_api_host is not empty
+      command: "oc get route -n {{ project_namespace }} -l app=ds-pipeline -o jsonpath='{.items[0].spec.host}'"
+      expected_min: 1
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: get-token
+    confidence: doc-derived
+    description: Get auth token
+    action:
+      type: query
+      command: "oc whoami -t"
+      store_as: oc_token
+    post_check:
+      assert: oc_token is not empty
+      command: "oc whoami -t"
+      expected_min: 1
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: submit-automl-run
+    confidence: inferred
+    description: Submit AutoML pipeline run via DSP API
+    action:
+      type: api_call
+      method: POST
+      url: "https://{{ pipeline_api_host }}/apis/v2beta1/runs"
+      headers:
+        Content-Type: "application/json"
+        Authorization: "Bearer {{ oc_token }}"
+      body: |
+        {
+          "display_name": "automl-{{ task_type }}-{{ label_column }}",
+          "description": "AutoML {{ task_type }} on {{ train_data_s3_path }}",
+          "namespace": "{{ project_namespace }}",
+          "runtime_config": {
+            "parameters": {
+              "train_data": "{{ train_data_s3_path }}",
+              "label": "{{ label_column }}",
+              "task": "{{ task_type }}",
+              "presets": "{{ quality_preset }}",
+              "time_limit": "{{ time_limit_seconds }}",
+              "output_path": "{{ model_output_path }}"
+            }
+          }
+        }
+      store_response_as: automl_run
+    post_check:
+      assert: automl_run is not empty
+      command: "echo ok"
+      expected: "ok"
+      timeout: "15s"
+      on_fail: STOP
+    return: |
+      ✓ AutoML pipeline run submitted.
+
+      Run ID:   {{ automl_run.run_id }}
+      Task:     {{ task_type }}
+      Label:    {{ label_column }}
+      Preset:   {{ quality_preset }}
+      Timeout:  {{ time_limit_seconds }}s
+
+      Monitor: Projects → {{ project_namespace }} → Pipelines → Runs
+      Output model will be written to: {{ model_output_path }}
+
+      After completion, register the model:
+        odh run model-registry/register-model \
+          -p registry_name=model-registry \
+          -p model_name=automl-{{ label_column }} \
+          -p model_uri={{ model_output_path }} \
+          -p model_format=onnx
+
+      ─────────────────────────────────────────────────────
+      AutoML pipeline components (AutoGluon-based):
+        1. Data validation and preprocessing
+        2. Feature engineering (automatic)
+        3. Model selection and ensembling
+        4. Hyperparameter optimization
+        5. Model artifact export (ONNX or pickle)
+        6. Metrics logging to MLflow (if configured)
+
+      Quality presets:
+        best_quality    — Maximum accuracy, very slow (hours)
+        high_quality    — High accuracy, slow (30-60 min)
+        good_quality    — Good accuracy, moderate (15-30 min) ← default
+        medium_quality  — Decent accuracy, fast (5-15 min)
+      ─────────────────────────────────────────────────────
+
+known_bad_patterns:
+  - "never run AutoML on raw unvalidated data — ensure no NaN in label column"
+  - "never use best_quality preset without GPU nodes — it will run for many hours on CPU"
+  - "never submit AutoML without S3 storage configured — artifacts won't be saved"
+  - "never use multiclass task with a binary label column — use classification instead"
+
+rollback_order:
+  - "POST https://{{ pipeline_api_host }}/apis/v2beta1/runs/{{ automl_run.run_id }}:cancel"

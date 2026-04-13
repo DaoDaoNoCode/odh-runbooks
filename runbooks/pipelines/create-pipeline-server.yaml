@@ -1,0 +1,228 @@
+name: pipelines-create-pipeline-server
+description: >
+  Create a Data Science Pipelines Application (DSPA) in a project.
+  Matches EXACTLY what the ODH dashboard creates:
+  - CRD: datasciencepipelinesapplications.opendatahub.io/v1alpha1 DataSciencePipelinesApplication
+  - S3 storage spec: externalStorage with scheme, s3CredentialsSecret referencing exact data key names
+  - s3CredentialsSecret.accessKey = "AWS_ACCESS_KEY_ID" (the KEY NAME in the secret, not the value)
+  - s3CredentialsSecret.secretKey = "AWS_SECRET_ACCESS_KEY" (the KEY NAME in the secret, not the value)
+  Per ADR-0002: each project gets its own isolated pipeline server (one DSPA per namespace).
+rhoai_version_tested: null
+confidence_overall: doc-derived
+
+parameters:
+  - name: project_namespace
+    description: Project namespace to create pipeline server in
+    required: true
+  - name: s3_connection_name
+    description: >
+      Name of the S3 connection secret in the project.
+      Leave empty to auto-discover the first S3 connection in the namespace
+      (e.g. when S3 was auto-provisioned via MinIO by the dependency resolver).
+    required: false
+    default: ""
+  - name: s3_bucket
+    description: "S3 bucket for pipeline artifacts. Leave empty to read from discovered connection."
+    required: false
+    default: ""
+  - name: s3_endpoint
+    description: "S3 endpoint URL. Leave empty to read from discovered connection."
+    required: false
+    default: ""
+  - name: s3_region
+    description: S3 region
+    required: false
+    default: us-east-1
+  - name: dspa_name
+    description: Name for the pipeline server CR
+    required: false
+    default: pipelines-definition
+
+steps:
+  - id: check-dsp-enabled
+    confidence: doc-derived
+    description: Verify DSP is enabled, namespace and S3 connection exist
+    requires:
+      - type: dsc-exists
+      - type: dsp-enabled
+      - type: namespace
+        name: "{{ project_namespace }}"
+      - type: s3-connection
+        namespace: "{{ project_namespace }}"
+      - type: storage-class
+    pre_check:
+      command: "oc get dsc -o jsonpath='{.items[0].spec.components.datasciencepipelines.managementState}'"
+      expected: "Managed"
+      on_fail: STOP
+    action:
+      type: none
+    post_check:
+      command: "oc get dsc -o jsonpath='{.items[0].spec.components.datasciencepipelines.managementState}'"
+      expected: "Managed"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: discover-s3-connection
+    confidence: doc-derived
+    description: >
+      Discover S3 connection details from the namespace if not explicitly provided.
+      When the dependency resolver auto-provisioned an S3 connection (via MinIO),
+      we need to discover its name and details to configure DSPA.
+    action:
+      type: query
+      command: |
+        # Use provided name or discover the first S3 connection
+        if [ -n "{{ s3_connection_name }}" ]; then
+          NAME="{{ s3_connection_name }}"
+        else
+          NAME=$(oc get secret -n {{ project_namespace }} \
+            -l opendatahub.io/connection-type=s3 \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+        fi
+        if [ -z "$NAME" ]; then
+          echo "ERROR: No S3 connection found in {{ project_namespace }}"
+          exit 1
+        fi
+        # Read connection details from the secret
+        BUCKET=$(oc get secret "$NAME" -n {{ project_namespace }} \
+          -o jsonpath='{.data.AWS_S3_BUCKET}' 2>/dev/null | base64 -d)
+        ENDPOINT=$(oc get secret "$NAME" -n {{ project_namespace }} \
+          -o jsonpath='{.data.AWS_S3_ENDPOINT}' 2>/dev/null | base64 -d)
+        REGION=$(oc get secret "$NAME" -n {{ project_namespace }} \
+          -o jsonpath='{.data.AWS_DEFAULT_REGION}' 2>/dev/null | base64 -d)
+        echo "${NAME}|${BUCKET}|${ENDPOINT}|${REGION:-us-east-1}"
+      store_as: s3_discovered
+    post_check:
+      assert: s3_discovered is not empty
+      command: "echo ok"
+      expected: "ok"
+      timeout: "15s"
+      on_fail: STOP
+
+  - id: extract-s3-endpoint-host
+    confidence: doc-derived
+    description: >
+      Extract hostname and other details from discovered or provided S3 connection.
+      DSPA 'host' field wants only the hostname (no scheme, no trailing slash).
+      Scheme is specified separately. Prefers explicit params, falls back to discovered.
+    action:
+      type: query
+      command: |
+        # Parse from discovered connection if params not explicitly provided
+        DISC_NAME=$(echo "{{ s3_discovered }}" | cut -d'|' -f1)
+        DISC_BUCKET=$(echo "{{ s3_discovered }}" | cut -d'|' -f2)
+        DISC_ENDPOINT=$(echo "{{ s3_discovered }}" | cut -d'|' -f3)
+        DISC_REGION=$(echo "{{ s3_discovered }}" | cut -d'|' -f4)
+
+        FINAL_NAME="{{ s3_connection_name }}"
+        [ -z "$FINAL_NAME" ] && FINAL_NAME="$DISC_NAME"
+        FINAL_BUCKET="{{ s3_bucket }}"
+        [ -z "$FINAL_BUCKET" ] && FINAL_BUCKET="$DISC_BUCKET"
+        FINAL_ENDPOINT="{{ s3_endpoint }}"
+        [ -z "$FINAL_ENDPOINT" ] && FINAL_ENDPOINT="$DISC_ENDPOINT"
+        FINAL_REGION="{{ s3_region }}"
+        [ -z "$FINAL_REGION" ] || [ "$FINAL_REGION" = "us-east-1" ] && FINAL_REGION="${DISC_REGION:-us-east-1}"
+
+        # Extract hostname only (remove scheme)
+        HOST=$(echo "$FINAL_ENDPOINT" | sed 's|https://||' | sed 's|http://||' | sed 's|/.*||')
+        # Determine scheme
+        SCHEME="https"
+        echo "$FINAL_ENDPOINT" | grep -q "^http://" && SCHEME="http"
+
+        echo "${FINAL_NAME}|${FINAL_BUCKET}|${HOST}|${SCHEME}|${FINAL_REGION}"
+      store_as: s3_host
+    post_check:
+      assert: s3_host is not empty
+      command: "echo ok"
+      expected: "ok"
+      timeout: "5s"
+      on_fail: STOP
+
+  - id: create-dspa
+    confidence: doc-derived
+    description: >
+      Create DataSciencePipelinesApplication CR matching EXACTLY what dashboard creates.
+      Key: s3CredentialsSecret references the DATA KEY NAMES in the secret (AWS_ACCESS_KEY_ID etc.)
+      not the actual credential values.
+      Scheme is 'https' or 'http' separately from the host.
+    pre_check:
+      command: "oc get dspa {{ dspa_name }} -n {{ project_namespace }} --no-headers 2>/dev/null | wc -l | tr -d ' '"
+      expected: "1"
+      if_already_true: skip
+      on_fail: STOP
+    action:
+      type: apply
+      dry_run: true
+      manifest: |
+        apiVersion: datasciencepipelinesapplications.opendatahub.io/v1alpha1
+        kind: DataSciencePipelinesApplication
+        metadata:
+          name: {{ dspa_name }}
+          namespace: {{ project_namespace }}
+        spec:
+          apiServer:
+            deploy: true
+            enableSamplePipeline: false
+          database:
+            disableHealthCheck: false
+            mariaDB:
+              deploy: true
+              pipelineDBName: mlpipeline
+              pvcSize: 10Gi
+          objectStorage:
+            disableHealthCheck: false
+            externalStorage:
+              bucket: "{{ s3_host.split('|')[1] }}"
+              host: "{{ s3_host.split('|')[2] }}"
+              port: ""
+              scheme: "{{ s3_host.split('|')[3] }}"
+              region: "{{ s3_host.split('|')[4] }}"
+              s3CredentialsSecret:
+                accessKey: AWS_ACCESS_KEY_ID
+                secretKey: AWS_SECRET_ACCESS_KEY
+                secretName: "{{ s3_host.split('|')[0] }}"
+          persistenceAgent:
+            deploy: true
+            numWorkers: 2
+          scheduledWorkflow:
+            deploy: true
+            cronScheduleTimezone: UTC
+    post_check:
+      command: "oc get dspa {{ dspa_name }} -n {{ project_namespace }} -o jsonpath='{.status.conditions[?(@.type==\"APIServerReady\")].status}' 2>/dev/null"
+      expected: "True"
+      timeout: "600s"
+      poll_interval: "20s"
+      on_fail: STOP
+    rollback: "oc delete dspa {{ dspa_name }} -n {{ project_namespace }}"
+    return: |
+      ✓ Pipeline server created: {{ dspa_name }}
+
+      Project:   {{ project_namespace }}
+      S3 connection: {{ s3_host.split('|')[0] }}
+      S3 bucket: {{ s3_host.split('|')[1] }}
+      S3 host:   {{ s3_host.split('|')[2] }}
+      Scheme:    {{ s3_host.split('|')[3] }}
+
+      Dashboard: Projects → {{ project_namespace }} → Pipelines
+
+      Important field notes:
+        - host = hostname only (no scheme, no trailing slash): {{ s3_host }}
+        - scheme = "https" separately
+        - accessKey/secretKey = the KEY NAMES in the secret (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY)
+        - secretName = the Kubernetes secret resource name
+
+known_bad_patterns:
+  - "CRITICAL: s3CredentialsSecret.accessKey is the KEY NAME in the secret (AWS_ACCESS_KEY_ID), not the actual access key value"
+  - "CRITICAL: host must be hostname only without scheme or trailing slash — scheme goes in the 'scheme' field"
+  - "never create more than one DSPA per namespace — only one pipeline server per project"
+  - "never set enableSamplePipeline: true in production — adds demo pipelines"
+  - "if endpoint is http (not https) change scheme to 'http' — MinIO on-cluster is often http"
+
+rollback_order:
+  - "oc delete dspa {{ dspa_name }} -n {{ project_namespace }}"
+
+tags: ["pipelines","setup"]
+estimated_minutes: 10
+next_steps:
+  - "Submit a pipeline: odh wizard pipelines/compile-and-submit-pipeline"
+  - "Run AutoML: odh wizard automl/run-automl-pipeline"

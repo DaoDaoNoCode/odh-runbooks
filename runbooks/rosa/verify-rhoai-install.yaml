@@ -1,0 +1,138 @@
+name: rosa-verify-rhoai-install
+description: >
+  Verify RHOAI installation on a ROSA cluster is healthy and ready.
+  Read-only diagnostic — checks operator, DSC, all pods, and Kyverno policies.
+  Run this after install-rhoai-prerelease or install-rhoai-stable to confirm
+  everything is working before creating a DataScienceCluster.
+rhoai_version_tested: null
+confidence_overall: doc-derived
+
+parameters: []
+
+steps:
+  - id: check-operator-csv
+    confidence: doc-derived
+    description: Verify RHOAI operator CSV is in Succeeded phase
+    requires:
+      - type: openshift-cluster
+    pre_check:
+      command: "oc get csv -n redhat-ods-operator --no-headers 2>/dev/null | grep -i 'rhods\|openshift-ai' | wc -l | tr -d ' '"
+      expected_min: 1
+      on_fail: STOP
+    action:
+      type: query
+      command: "oc get csv -n redhat-ods-operator --no-headers 2>/dev/null | grep -i 'rhods\|openshift-ai'"
+      store_as: csv_status
+    post_check:
+      command: "oc get csv -n redhat-ods-operator --no-headers 2>/dev/null | grep -i 'rhods\|openshift-ai' | awk '{print $NF}'"
+      expected: "Succeeded"
+      timeout: "30s"
+      on_fail: STOP
+
+  - id: check-operator-pods
+    confidence: doc-derived
+    description: Check all pods in redhat-ods-operator namespace are Running
+    action:
+      type: query
+      command: "oc get pods -n redhat-ods-operator --no-headers 2>/dev/null"
+      store_as: operator_pods
+    post_check:
+      command: "oc get pods -n redhat-ods-operator --no-headers 2>/dev/null | grep -v 'Running\|Completed' | wc -l | tr -d ' '"
+      expected: "0"
+      timeout: "30s"
+      on_fail: STOP
+
+  - id: check-catalog-source
+    confidence: doc-derived
+    description: Check CatalogSource is ready (for pre-release installs)
+    action:
+      type: query
+      command: "oc get catalogsource -n openshift-marketplace --no-headers 2>/dev/null | grep -i rhoai"
+      store_as: catalog_status
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: check-kyverno-policies
+    confidence: doc-derived
+    description: Check if Kyverno policies are active (pre-release install)
+    action:
+      type: query
+      command: |
+        echo "=== Kyverno ClusterPolicies ==="
+        oc get clusterpolicy 2>/dev/null || echo "Kyverno not installed (stable install)"
+        echo ""
+        echo "=== pull-secret-brew in openshift-config ==="
+        oc get secret pull-secret-brew -n openshift-config --no-headers 2>/dev/null || echo "Not present (stable install)"
+        echo ""
+        echo "=== pull-secret-brew synced to default namespace ==="
+        oc get secret pull-secret-brew -n default --no-headers 2>/dev/null || echo "Not synced (stable install - expected)"
+      store_as: kyverno_status
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: check-rhoai-applications-pods
+    confidence: doc-derived
+    description: Check redhat-ods-applications namespace (if DSC already created)
+    action:
+      type: query
+      command: |
+        echo "=== redhat-ods-applications pods ==="
+        oc get pods -n redhat-ods-applications --no-headers 2>/dev/null || echo "Namespace not yet created (DSC not applied yet)"
+      store_as: apps_pods
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+
+  - id: check-dsc-status
+    confidence: doc-derived
+    description: Check DataScienceCluster status (if already created)
+    action:
+      type: query
+      command: |
+        oc get dsc --no-headers 2>/dev/null || echo "No DataScienceCluster yet"
+        echo ""
+        if oc get dsc 2>/dev/null | grep -q .; then
+          oc get dsc -o jsonpath='{.items[0].status.conditions}' 2>/dev/null | python3 -m json.tool 2>/dev/null | grep -E "type|status|message" | head -20
+        fi
+      store_as: dsc_status
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
+    return: |
+      ✓ RHOAI verification complete.
+
+      Operator CSV:
+      {{ csv_status }}
+
+      Operator pods:
+      {{ operator_pods }}
+
+      Catalog sources (pre-release):
+      {{ catalog_status }}
+
+      Kyverno status:
+      {{ kyverno_status }}
+
+      Applications pods:
+      {{ apps_pods }}
+
+      DSC status:
+      {{ dsc_status }}
+
+      If everything looks good, run:
+        odh run cluster/full-stack-setup -p s3_endpoint=... ...
+
+known_bad_patterns:
+  - "this is a read-only runbook — no changes are made"
+
+rollback_order: []

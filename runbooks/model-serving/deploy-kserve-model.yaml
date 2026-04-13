@@ -175,7 +175,7 @@ steps:
       Format:   {{ model_format }}
       Endpoint: {{ model_url }}
 
-      Dashboard: Projects → {{ project_namespace }} → Models and model servers → {{ model_name }}
+      Dashboard: https://<odh-dashboard>/ai-hub/deployments/{{ project_namespace }}
 
       Annotations set (matching dashboard source):
         opendatahub.io/model-type: {{ model_type }}

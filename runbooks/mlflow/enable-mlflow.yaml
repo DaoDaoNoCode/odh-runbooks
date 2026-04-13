@@ -236,7 +236,7 @@ steps:
         - One MLflow server per cluster (cluster-scoped CR)
         - Server runs in {{ odh_namespace }}, not in your project
         - Workspace = your project namespace (experiments scoped by RBAC)
-        - Dashboard: click MLflow tile in RHOAI dashboard if enabled
+        - Dashboard: https://<odh-dashboard>/develop-train/mlflow/experiments?workspace={{ project_namespace }}
       ──────────────────────────────────────────────────────────────
 
 source_repos:

@@ -203,7 +203,7 @@ steps:
       S3 host:   {{ s3_host.split('|')[2] }}
       Scheme:    {{ s3_host.split('|')[3] }}
 
-      Dashboard: Projects → {{ project_namespace }} → Pipelines
+      Dashboard: https://<odh-dashboard>/develop-train/pipelines/definitions/{{ project_namespace }}
 
       Important field notes:
         - host = hostname only (no scheme, no trailing slash): {{ s3_host }}

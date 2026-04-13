@@ -53,17 +53,20 @@ Claude reads the relevant runbook, runs the `oc` commands directly using its Bas
 
 Every runbook's final output is a link to the specific dashboard page it created or enabled:
 
-| What you want to see in the dashboard | Runbook | Output |
+| What you want to see in the dashboard | Runbook | Dashboard URL |
 |---|---|---|
-| Eval run details page | `evalhub/create-evaluation-run` | `https://.../projects/{ns}/evalHub` |
-| Model serving endpoint, ready to query | `model-serving/deploy-vllm-model` | `https://.../projects/{ns}/models` + curl test |
-| Model serving (any format) | `model-serving/deploy-kserve-model` | `https://.../projects/{ns}/models/{name}` |
-| Workbench, ready to open | `workbenches/create-workbench` | direct notebook URL |
-| Pipeline server + Pipelines tab | `pipelines/create-pipeline-server` | `https://.../projects/{ns}/pipelines` |
-| Model Registry UI | `model-registry/enable-registry` | `https://.../modelRegistry` |
-| MLflow experiment tracking | `mlflow/enable-mlflow` | tracking URI + dashboard link |
-| TrustyAI fairness monitoring | `trustyai/enable-trustyai-service` | service URL + bias metrics endpoint |
-| Chat playground (GenAI) | `genai/enable-chat-playground` | `https://.../projects/{ns}/chatPlayground` |
+| Eval run details page | `evalhub/create-evaluation-run` | `.../evaluation/{ns}` |
+| Deployed vLLM model, ready to query | `model-serving/deploy-vllm-model` | `.../ai-hub/deployments/{ns}` + curl test |
+| Deployed model (any format) | `model-serving/deploy-kserve-model` | `.../ai-hub/deployments/{ns}` |
+| Workbench / notebook, ready to open | `workbenches/create-workbench` | `.../projects/{ns}` → Workbenches + direct notebook URL |
+| Pipeline server + Pipelines tab | `pipelines/create-pipeline-server` | `.../develop-train/pipelines/definitions/{ns}` |
+| Pipeline run details | `pipelines/compile-and-submit-pipeline` | `.../develop-train/pipelines/runs/{ns}/runs/{runId}` |
+| Recurring run / schedule | `pipelines/create-recurring-run` | `.../develop-train/pipelines/runs/{ns}/schedules` |
+| Model Registry UI | `model-registry/enable-registry` | `.../ai-hub/models/registry/{name}` |
+| MLflow experiment tracking | `mlflow/enable-mlflow` | `.../develop-train/mlflow/experiments?workspace={ns}` |
+| Distributed workloads / Ray jobs | `distributed-workloads/submit-ray-job` | `.../observe-monitor/workload-metrics/workload-status/{ns}` |
+| Chat playground | `genai/enable-chat-playground` | `.../playground/{ns}` |
+| TrustyAI fairness monitoring | `trustyai/enable-trustyai-service` | service URL + bias metrics at `.../ai-hub/deployments/{ns}/metrics/{model}/configure` |
 
 Cluster-level setup (no dashboard page, but unblocks everything else):
 

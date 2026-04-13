@@ -229,7 +229,7 @@ steps:
       Workers:    {{ num_workers }}x {{ cpu_per_worker }} CPU / {{ memory_per_worker }}
       Entrypoint: {{ entrypoint }}
 
-      Dashboard: Distributed Workloads section in ODH dashboard
+      Dashboard: https://<odh-dashboard>/observe-monitor/workload-metrics/workload-status/{{ project_namespace }}
 
 source_repos:
   - "https://github.com/project-codeflare/codeflare-operator"

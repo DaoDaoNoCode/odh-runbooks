@@ -92,7 +92,7 @@ steps:
       Project: {{ project_namespace }}
       Role:    {{ role }}
 
-      Dashboard: Projects → {{ project_namespace }} → Permissions → {{ username }}
+      Dashboard: https://<odh-dashboard>/projects/{{ project_namespace }}/permissions
 
 source_repos:
   - "https://github.com/opendatahub-io/odh-dashboard"

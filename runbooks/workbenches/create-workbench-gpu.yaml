@@ -211,7 +211,8 @@ steps:
       Image: {{ notebook_image }}
       Memory: {{ memory_request }}
 
-      Dashboard: Projects → {{ project_namespace }} → Workbenches → {{ workbench_name }} → Open
+      Dashboard: https://<odh-dashboard>/projects/{{ project_namespace }}
+               → Workbenches tab → {{ workbench_name }} → Open
 
 source_repos:
   - "https://github.com/opendatahub-io/notebooks"

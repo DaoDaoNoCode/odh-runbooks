@@ -99,7 +99,8 @@ steps:
       Bucket:   {{ s3_bucket }}
       Endpoint: {{ s3_endpoint }}
 
-      Dashboard: Projects → {{ project_namespace }} → Connections → {{ connection_name }}
+      Dashboard: https://<odh-dashboard>/projects/{{ project_namespace }}
+               → Connections tab → {{ connection_name }}
 
       This connection can be used for:
         - Workbench data access (env var injection)

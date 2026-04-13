@@ -115,7 +115,7 @@ steps:
 
       API version: modelregistry.opendatahub.io/v1beta1
       REST API:    https://{{ registry_host }}/api/model_registry/v1alpha3
-      Dashboard:   Model Registry section in ODH dashboard
+      Dashboard:   https://<odh-dashboard>/ai-hub/models/registry/{{ registry_name }}
 
       The dashboard discovers registries by:
         oc get modelregistry -n odh-model-registries

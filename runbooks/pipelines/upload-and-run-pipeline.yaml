@@ -123,7 +123,7 @@ steps:
       Run: {{ run_name }}
       Run ID: {{ pipeline_run.run_id }}
 
-      Dashboard: Projects → {{ project_namespace }} → Pipelines → Runs → {{ run_name }}
+      Dashboard: https://<odh-dashboard>/develop-train/pipelines/runs/{{ project_namespace }}/runs/{{ pipeline_run.run_id }}
 
 source_repos:
   - "https://github.com/opendatahub-io/data-science-pipelines-operator"

@@ -309,7 +309,7 @@ steps:
           -H "Content-Type: application/json" \
           -d '{"model": "{{ model_name }}", "messages": [{"role": "user", "content": "Hello!"}]}'
 
-      Dashboard: Projects → {{ project_namespace }} → Models and model servers
+      Dashboard: https://<odh-dashboard>/ai-hub/deployments/{{ project_namespace }}
 
       NOTE for CPU deployments: ~3 tokens/s — very slow, not for production.
       For LlamaStack integration, use this endpoint as the VLLM_URL.

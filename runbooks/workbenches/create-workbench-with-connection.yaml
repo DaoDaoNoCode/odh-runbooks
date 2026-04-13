@@ -225,7 +225,8 @@ steps:
       S3 connection: {{ s3_connection_name }} (env vars injected, optional=true)
 
       Open:  https://{{ workbench_host }}/notebook/{{ project_namespace }}/{{ workbench_name }}
-      Dashboard: Projects → {{ project_namespace }} → Workbenches → {{ workbench_name }} → Open
+      Dashboard: https://<odh-dashboard>/projects/{{ project_namespace }}
+               → Workbenches tab → {{ workbench_name }} → Open
 
 source_repos:
   - "https://github.com/opendatahub-io/notebooks"

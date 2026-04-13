@@ -160,7 +160,7 @@ steps:
       Artifact ID:         {{ model_artifact.id }}
       Storage URI:         {{ model_uri }}
 
-      Dashboard: Model Registry → {{ model_name }} → Version {{ model_version }}
+      Dashboard: https://<odh-dashboard>/ai-hub/models/registry/{{ registry_name }}/registered-models
       Next step: odh run model-registry/deploy-from-registry -p registry_name={{ registry_name }} -p model_version_id={{ model_version_obj.id }}
 
 source_repos:

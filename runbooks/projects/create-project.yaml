@@ -105,7 +105,7 @@ steps:
         opendatahub.io/dashboard: "true"  ← required for dashboard listing
         kueue.openshift.io/managed: "true" ← required for Kueue integration
 
-      Dashboard: Projects → {{ display_name }}
+      Dashboard: https://<odh-dashboard>/projects/{{ project_namespace }}
 
       Next steps:
         odh run workbenches/create-workbench -p project_namespace={{ project_name }}

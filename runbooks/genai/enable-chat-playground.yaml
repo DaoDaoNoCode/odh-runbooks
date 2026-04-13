@@ -90,8 +90,7 @@ steps:
       Endpoint: {{ model_url }}
       OpenAI-compatible: ✓
 
-      Dashboard: https://{{ dashboard_host }}
-      Look for: AI/LLM Playground or Chat section in the left navigation
+      Dashboard: https://{{ dashboard_host }}/playground/{{ project_namespace }}
 
       Manual step: If the playground is not visible, check with your admin that
       the GenAI feature flag is enabled in the dashboard configuration.

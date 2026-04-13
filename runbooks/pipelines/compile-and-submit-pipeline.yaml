@@ -159,8 +159,8 @@ steps:
       Run:      {{ run_name }} (ID: {{ pipeline_run.run_id }})
       Experiment: {{ experiment_name }}
 
-      Dashboard: Projects → {{ project_namespace }} → Pipelines → Runs → {{ run_name }}
-      API:       https://{{ pipeline_api_host }}/apis/v2beta1/runs/{{ pipeline_run.run_id }}
+      Dashboard: https://<odh-dashboard>/develop-train/pipelines/runs/{{ project_namespace }}/runs/{{ pipeline_run.run_id }}
+      Run URL:   https://<odh-dashboard>/develop-train/pipelines/runs/{{ project_namespace }}/runs/{{ pipeline_run.run_id }}
 
       ────────────────────────────────────────────────────────
       Compile your pipeline locally first:

@@ -241,7 +241,8 @@ steps:
       Storage:   {{ pvc_size }}
 
       Direct URL:  https://{{ workbench_host }}/notebook/{{ project_namespace }}/{{ workbench_name }}
-      Dashboard:   Projects → {{ project_namespace }} → Workbenches → {{ workbench_name }} → Open
+      Dashboard:   https://<odh-dashboard>/projects/{{ project_namespace }}
+                   → Workbenches tab → {{ workbench_name }} → Open
 
       Size profiles (dashboard standard):
         Small:   1 CPU,  8Gi RAM

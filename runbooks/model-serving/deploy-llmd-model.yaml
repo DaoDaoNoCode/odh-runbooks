@@ -218,7 +218,7 @@ steps:
         - Queue-aware: routes to least-loaded pod
         - Activates fully with {{ num_replicas }} replicas
 
-      Dashboard: Projects → {{ project_namespace }} → Models and model servers
+      Dashboard: https://<odh-dashboard>/ai-hub/deployments/{{ project_namespace }}
 
 source_repos:
   - "https://github.com/kserve/kserve"

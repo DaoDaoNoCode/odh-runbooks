@@ -116,7 +116,7 @@ steps:
       Run ID:      {{ recurring_run.recurring_run_id }}
       Status:      ENABLED
 
-      Dashboard: Projects → {{ project_namespace }} → Pipelines → Schedules
+      Dashboard: https://<odh-dashboard>/develop-train/pipelines/runs/{{ project_namespace }}/schedules
 
       Manage via API:
         # Pause:

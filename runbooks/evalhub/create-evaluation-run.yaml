@@ -454,7 +454,7 @@ steps:
       Benchmark:  arc_easy via {{ benchmark_provider }}
 
       ── View results ────────────────────────────────────────────
-      https://{{ dashboard_host }}/projects/{{ project_namespace }}/evalHub
+      https://{{ dashboard_host }}/evaluation/{{ project_namespace }}
 
       Re-run with different options:
         Smaller model (faster): -p model_catalog_tag=llama-3.2-1b-instruct

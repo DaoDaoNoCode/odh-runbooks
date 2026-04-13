@@ -220,7 +220,7 @@ steps:
         name:                {{ registry_name }}
         namespace:           {{ registry_namespace }}
 
-      Dashboard: Projects → {{ project_namespace }} → Models and model servers
+      Dashboard: https://<odh-dashboard>/ai-hub/deployments/{{ project_namespace }}
       Model Registry: shows this deployment linked to version {{ model_version_id }}
 
       Auto-created by odh-model-controller (do not create manually):

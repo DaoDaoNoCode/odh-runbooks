@@ -467,6 +467,57 @@ MLflow (`/develop-train/mlflow`):
 
 ---
 
+## Pod scheduling — fail fast, don't wait 15 minutes
+
+When a model deployment step polls for `activeModelState=Loaded`, **always check pod conditions
+after the first 45 seconds**. Two terminal conditions that will NEVER self-resolve:
+
+### Unschedulable — no node has sufficient resources
+```bash
+# Check for Unschedulable condition
+oc get pod -l serving.kserve.io/inferenceservice=<model> -n <ns> \
+  -o jsonpath='{.items[0].status.conditions[?(@.reason=="Unschedulable")].message}'
+
+# Check what resources nodes actually have
+oc get nodes --no-headers | awk '{print $1, $4, $5}'
+oc get nodes -l nvidia.com/gpu.present=true --no-headers || echo "(no GPU nodes)"
+```
+
+**If GPU requested but no GPU nodes:** this is the most common case. Standard fix:
+1. `oc delete inferenceservice <model> -n <ns>`
+2. `oc delete servingruntime vllm-cuda-runtime -n <ns>` (if created)
+3. Recreate with CPU runtime: `oc process -n redhat-ods-applications vllm-cpu-runtime-template | oc apply -n <ns> -f -`
+4. Use a small model: `qwen2.5-0.5b-instruct` (~1 GB, needs ~6 Gi memory, ~4 CPU)
+
+**If CPU/memory insufficient:** use a smaller model or reduce resource requests.
+Check: `oc describe nodes | grep -A 5 "Allocated resources"`
+
+### ImagePullBackOff / ErrImagePull — terminal, never self-heals
+```bash
+oc get pod -l serving.kserve.io/inferenceservice=<model> -n <ns> \
+  -o jsonpath='{.items[0].status.containerStatuses[*].state.waiting.reason}'
+# Also check init containers:
+  -o jsonpath='{.items[0].status.initContainerStatuses[*].state.waiting.reason}'
+```
+
+Stop immediately — retrying the same image URI will not fix an image pull error.
+Check the OCI URI in the InferenceService manifest. Verify registry is accessible.
+`oc describe pod -l serving.kserve.io/inferenceservice=<model> -n <ns> | grep "Failed to pull"`
+
+### Polling loop pattern — check both state AND pod health
+When waiting for a model to load, check both every iteration:
+```bash
+# Bad: only checks InferenceService state (misses terminal pod conditions)
+STATE=$(oc get inferenceservice ... -o jsonpath='{.status.modelStatus.states.activeModelState}')
+
+# Good: also check pod conditions every iteration
+POD=$(oc get pods -l serving.kserve.io/inferenceservice=<model> -n <ns> --no-headers | head -1)
+POD_STATUS=$(echo "$POD" | awk '{print $3}')
+# If ImagePullBackOff or Unschedulable → stop immediately, don't wait 15 minutes
+```
+
+---
+
 ## Key technical facts
 
 **The dashboard host:**

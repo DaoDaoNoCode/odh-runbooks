@@ -406,6 +406,109 @@ steps:
         Check logs:    oc logs -l serving.kserve.io/inferenceservice={{ model_name }} -n {{ project_namespace }}
     rollback: "oc delete inferenceservice {{ model_name }} -n {{ project_namespace }} 2>/dev/null || true"
 
+  - id: check-pod-scheduling
+    confidence: doc-derived
+    description: >
+      Early failure detection ~45 seconds after InferenceService creation.
+      Catches the two terminal conditions that will NEVER self-resolve — do not
+      continue waiting 15 minutes if either is present:
+
+      1. UNSCHEDULABLE — no node has enough resources to schedule the pod.
+         Detected from: pod status condition reason=Unschedulable.
+         Act immediately:
+         - If GPU insufficient (no GPU nodes / all full): delete the InferenceService
+           and ServingRuntime, then recreate using a CPU runtime with a smaller model.
+           Standard CPU runtimes: vllm-cpu-runtime-template, vllm-cpu-x86-runtime-template
+           Smallest safe CPU model: qwen2.5-0.5b-instruct (~1 GB, needs ~6 Gi memory)
+         - If CPU/memory insufficient: cluster is full — use a smaller model or wait.
+
+      2. IMAGEPULLBACKOFF / ErrImagePull — the image cannot be pulled.
+         Detected from: pod containerStatuses[].state.waiting.reason.
+         This is a terminal condition — retrying will not fix it.
+         Stop immediately and fix the image URI or registry access.
+
+      If pod is in Init / PodInitializing / ContainerCreating / Running:
+      it is making genuine progress → continue to the long wait.
+    action:
+      type: query
+      command: |
+        echo "Waiting 45s for scheduling attempt..."
+        sleep 45
+
+        POD_LINE=$(oc get pods -n {{ project_namespace }} \
+          -l serving.kserve.io/inferenceservice={{ model_name }} \
+          --no-headers 2>/dev/null | head -1)
+
+        if [ -z "$POD_LINE" ]; then
+          echo "no pod yet — InferenceService controller still processing"
+          echo "ok"
+          exit 0
+        fi
+
+        POD_NAME=$(echo "$POD_LINE" | awk '{print $1}')
+        POD_STATUS=$(echo "$POD_LINE" | awk '{print $3}')
+        echo "Pod: $POD_NAME  Status: $POD_STATUS"
+
+        # --- Check Unschedulable ---
+        UNSCHED=$(oc get pod "$POD_NAME" -n {{ project_namespace }} \
+          -o jsonpath='{.status.conditions[?(@.reason=="Unschedulable")].message}' \
+          2>/dev/null)
+        if [ -n "$UNSCHED" ]; then
+          echo "UNSCHEDULABLE: $UNSCHED"
+          echo ""
+          echo "=== Node resources ==="
+          oc get nodes --no-headers 2>/dev/null | awk '{print $1, $4, $5}'
+          echo "GPU nodes:"
+          oc get nodes -l nvidia.com/gpu.present=true --no-headers 2>/dev/null || echo "  (none)"
+          echo "terminal-unschedulable"
+          exit 0
+        fi
+
+        # --- Check ImagePullBackOff (containers + init containers) ---
+        IMG_ERR=$(oc get pod "$POD_NAME" -n {{ project_namespace }} \
+          -o jsonpath='{.status.containerStatuses[*].state.waiting.reason} {.status.initContainerStatuses[*].state.waiting.reason}' \
+          2>/dev/null | tr ' ' '\n' | grep -iE "ImagePullBackOff|ErrImagePull" | head -1)
+        if [ -n "$IMG_ERR" ]; then
+          echo "IMAGE PULL ERROR: $IMG_ERR"
+          oc describe pod "$POD_NAME" -n {{ project_namespace }} 2>/dev/null | \
+            grep -E "Failed to pull|Error.*image|Back-off pulling" | head -5
+          echo "terminal-imagepull"
+          exit 0
+        fi
+
+        echo "Pod is progressing ($POD_STATUS) — proceeding to long wait"
+        echo "ok"
+      store_as: pod_scheduling_status
+    post_check:
+      command: |
+        POD_NAME=$(oc get pods -n {{ project_namespace }} \
+          -l serving.kserve.io/inferenceservice={{ model_name }} \
+          --no-headers 2>/dev/null | head -1 | awk '{print $1}')
+        if [ -z "$POD_NAME" ]; then echo "ok"; exit 0; fi
+        IMG=$(oc get pod "$POD_NAME" -n {{ project_namespace }} \
+          -o jsonpath='{.status.containerStatuses[*].state.waiting.reason} {.status.initContainerStatuses[*].state.waiting.reason}' \
+          2>/dev/null | tr ' ' '\n' | grep -iE "ImagePullBackOff|ErrImagePull" | head -1)
+        UNSCHED=$(oc get pod "$POD_NAME" -n {{ project_namespace }} \
+          -o jsonpath='{.status.conditions[?(@.reason=="Unschedulable")].message}' \
+          2>/dev/null)
+        if [ -n "$IMG" ]; then echo "imagepull-error"
+        elif [ -n "$UNSCHED" ]; then echo "unschedulable"
+        else echo "ok"; fi
+      expected: "ok"
+      timeout: "90s"
+      on_fail: STOP
+    on_fail_hint: >
+      UNSCHEDULABLE — pod cannot be scheduled:
+        GPU nodes missing/full: delete the InferenceService and its ServingRuntime,
+          then recreate using a CPU runtime:
+          oc process -n redhat-ods-applications vllm-cpu-runtime-template | oc apply -n {{ project_namespace }} -f -
+          Use a small model: qwen2.5-0.5b-instruct (1 GB, needs ~6 Gi memory, ~4 CPU)
+        CPU/memory insufficient: use a smaller model or reduce resource requests.
+        Check resources: oc describe nodes | grep -A 5 "Allocated resources"
+      IMAGEPULLBACKOFF — terminal, will never self-heal:
+        Verify the OCI URI is correct and the registry is accessible.
+        oc describe pod -l serving.kserve.io/inferenceservice={{ model_name }} -n {{ project_namespace }} | grep -A3 "Failed to pull"
+
   - id: get-model-url
     confidence: doc-derived
     description: Get final model URL (from existing or newly deployed model)

@@ -29,32 +29,260 @@ You do NOT need the `odh` CLI. Read the runbook YAML directly and execute using 
 
 ---
 
-## Request → runbook → dashboard URL
+## Runbook discovery — match intent to runbook
 
-| User asks for | Read this runbook | Dashboard URL at the end |
-|---|---|---|
-| EvalHub / evaluation run | `evalhub/create-evaluation-run` | `.../evaluation/{ns}` |
-| Deploy vLLM model | `model-serving/deploy-vllm-model` | `.../ai-hub/deployments/{ns}` |
-| Deploy any model | `model-serving/deploy-kserve-model` | `.../ai-hub/deployments/{ns}` |
-| Pipeline server / Pipelines tab | `pipelines/create-pipeline-server` | `.../develop-train/pipelines/definitions/{ns}` |
-| Run a pipeline | `pipelines/compile-and-submit-pipeline` | `.../develop-train/pipelines/runs/{ns}/runs/{runId}` |
-| Schedule a recurring pipeline | `pipelines/create-recurring-run` | `.../develop-train/pipelines/runs/{ns}/schedules` |
-| Workbench / notebook | `workbenches/create-workbench` | `.../projects/{ns}` → Workbenches tab + direct notebook URL |
-| Model Registry UI | `model-registry/enable-registry` | `.../ai-hub/models/registry/{name}` |
-| Register a model | `model-registry/register-model` | `.../ai-hub/models/registry/{name}/registered-models` |
-| Deploy from model registry | `model-registry/deploy-from-registry` | `.../ai-hub/deployments/{ns}` |
-| MLflow experiment tracking | `mlflow/enable-mlflow` | `.../develop-train/mlflow/experiments?workspace={ns}` |
-| Ray / distributed workloads | `distributed-workloads/submit-ray-job` | `.../observe-monitor/workload-metrics/workload-status/{ns}` |
-| Chat playground | `genai/enable-chat-playground` | `.../playground/{ns}` |
-| TrustyAI / bias monitoring | `trustyai/enable-trustyai-service` | `.../ai-hub/deployments/{ns}/metrics/{model}/configure` |
-| Enable KServe | `cluster/enable-kserve` | (cluster-level, unblocks model serving) |
-| Enable pipelines operator | `cluster/enable-pipelines` | (cluster-level, unblocks pipelines) |
-| Enable model registry operator | `cluster/enable-model-registry` | (cluster-level, unblocks registry) |
-| Install RHOAI on ROSA | `rosa/install-rhoai-stable` or `rosa/install-rhoai-prerelease` | (cluster-level) |
-| Set up everything | `cluster/full-stack-setup` | (enables all components) |
-| Create a project | `projects/create-project` | `.../projects/{ns}` |
-| Add GPU node | `rosa/setup-gpu-machinepool` | (cluster-level) |
-| Observability dashboard | `observability/enable-perses-dashboard` | (cluster-level) |
+When the user asks for something, match their intent against the list below. Look for the goal,
+not just the exact words. If you find a match: read that runbook YAML and execute it.
+If nothing matches: follow the **No runbook found** protocol at the bottom of this section.
+
+---
+
+### Model evaluation / EvalHub
+**Runbook:** `evalhub/create-evaluation-run` → dashboard: `.../evaluation/{ns}`
+
+Matches: "run an eval", "evaluate my model", "create an evaluation run", "set up EvalHub",
+"benchmark my LLM", "test model accuracy", "run arc_easy", "lm-evaluation-harness",
+"garak safety eval", "red-team my model", "model quality check", "evaluation job",
+"evalhub", "trustyai eval", "score my model", "how good is my model"
+
+---
+
+### Deploy a model / model serving
+**Runbook:** `model-serving/deploy-vllm-model` (LLMs/generative) or `model-serving/deploy-kserve-model` (any format)
+→ dashboard: `.../ai-hub/deployments/{ns}`
+
+Matches: "deploy a model", "serve a model", "host a model", "run inference", "get a model endpoint",
+"deploy vLLM", "deploy llama", "deploy granite", "deploy an LLM", "model serving",
+"InferenceService", "KServe", "set up model server", "I want to query a model via API",
+"OpenAI-compatible endpoint", "model is not showing in dashboard", "deploy from OCI",
+"modelcar catalog", "deploy without S3", "vLLM on GPU", "vLLM on CPU",
+"set up a serving runtime", "deploy a generative model", "deploy a predictive model",
+"sklearn model", "xgboost model", "onnx model", "llama3", "mistral", "qwen"
+
+Use `deploy-vllm-model` for LLMs (vLLM runtime). Use `deploy-kserve-model` for sklearn/xgboost/onnx/other formats.
+
+---
+
+### Deploy a model from model registry
+**Runbook:** `model-registry/deploy-from-registry` → dashboard: `.../ai-hub/deployments/{ns}`
+
+Matches: "deploy from registry", "deploy a registered model", "promote model to serving",
+"take model from registry and deploy", "model registry → deploy"
+
+---
+
+### Workbenches / notebooks
+**Runbook:** `workbenches/create-workbench` (standard), `workbenches/create-workbench-gpu` (GPU),
+`workbenches/create-workbench-with-connection` (with S3)
+→ dashboard: `.../projects/{ns}` → Workbenches tab + direct notebook URL
+
+Matches: "create a workbench", "open a notebook", "start a JupyterLab", "I need a notebook",
+"set up a development environment", "create a Jupyter environment", "I want to write code",
+"notebook server", "workbench", "data science notebook", "GPU notebook", "CUDA notebook",
+"notebook with S3 access", "notebook with data connection", "codeserver", "VSCode in the browser",
+"workbench is not showing", "can't open my notebook", "add a custom notebook image" (→ `workbenches/add-byon-image`)
+
+---
+
+### Data Science Pipelines / Kubeflow Pipelines
+**Runbook:** `pipelines/create-pipeline-server` (enable pipelines in a project)
+→ dashboard: `.../develop-train/pipelines/definitions/{ns}`
+
+Also: `pipelines/compile-and-submit-pipeline` (run a pipeline), `pipelines/upload-and-run-pipeline`,
+`pipelines/create-recurring-run` (schedules), `pipelines/write-kfp-component`
+
+Matches: "set up pipelines", "enable pipelines", "I don't see a Pipelines tab", "create pipeline server",
+"DSPA", "Data Science Pipelines", "Kubeflow Pipelines", "KFP", "run a pipeline",
+"submit a pipeline", "schedule a pipeline", "recurring run", "pipeline server not working",
+"pipeline tab missing", "upload a pipeline YAML", "compile a pipeline", "create a pipeline run",
+"automate my ML workflow", "ML pipeline", "pipeline experiment"
+
+---
+
+### MLflow / experiment tracking
+**Runbook:** `mlflow/enable-mlflow` (enable), `mlflow/log-training-run`, `mlflow/register-model-from-run`,
+`mlflow/promote-model-to-production`, `mlflow/search-and-compare-runs`
+→ dashboard: `.../develop-train/mlflow/experiments?workspace={ns}`
+
+Matches: "set up MLflow", "track my experiments", "log training runs", "MLflow tracking server",
+"experiment tracking", "I want to compare runs", "log metrics", "log artifacts",
+"register a model from MLflow", "MLflow UI", "MLflow is not accessible",
+"where do I see my training runs", "compare model versions", "MLflow experiment",
+"track my fine-tuning", "track my training job", "mlflow.set_tracking_uri"
+
+---
+
+### Model Registry
+**Runbook:** `model-registry/enable-registry` (enable), `model-registry/register-model`,
+`model-registry/search-and-compare-models`
+→ dashboard: `.../ai-hub/models/registry/{name}`
+
+Matches: "enable model registry", "set up model registry", "register a model", "catalog my models",
+"model versioning", "model lineage", "promote model to production", "model registry",
+"I want to keep track of my models", "model catalog", "model governance",
+"where do I store my models", "model metadata", "model versions"
+
+---
+
+### Distributed workloads / Ray
+**Runbook:** `distributed-workloads/submit-ray-job`
+→ dashboard: `.../observe-monitor/workload-metrics/workload-status/{ns}`
+
+Also enable with: `cluster/enable-codeflare`
+
+Matches: "submit a Ray job", "distributed training", "run a Ray cluster", "scale my training",
+"multi-node training", "CodeFlare", "AppWrapper", "Kueue", "RayJob", "RayCluster",
+"distributed workloads", "train on multiple GPUs across nodes", "Ray tune",
+"I want to run a large training job", "parallel training"
+
+---
+
+### PyTorch training jobs
+**Runbook:** `model-training/submit-pytorch-job`
+
+Matches: "PyTorchJob", "submit a training job", "run a PyTorch training job",
+"Kubeflow Training Operator", "train a model on the cluster", "TFJob"
+
+---
+
+### AutoML / AutoRAG
+**Runbook:** `automl/run-automl-pipeline` or `autorag/run-autorag-pipeline`
+
+Matches: "AutoML", "auto machine learning", "automated model training",
+"AutoRAG", "auto RAG", "optimize my RAG pipeline", "RAG evaluation"
+
+---
+
+### Chat playground / GenAI
+**Runbook:** `genai/enable-chat-playground`
+→ dashboard: `.../playground/{ns}`
+
+Matches: "chat with my model", "chat playground", "LLM playground", "test my model in the UI",
+"I want a UI to talk to my model", "GenAI studio", "AI playground",
+"chat interface", "I don't see the playground", "enable chat"
+
+---
+
+### TrustyAI / fairness / bias monitoring
+**Runbook:** `trustyai/enable-trustyai-service`
+→ dashboard: `.../ai-hub/deployments/{ns}/metrics/{model}/configure`
+
+Matches: "enable TrustyAI", "bias detection", "fairness metrics", "model explainability",
+"detect bias in my model", "monitor my model for drift", "TrustyAI",
+"payload logging", "SHAP explanations", "model fairness", "AI governance",
+"responsible AI monitoring"
+
+---
+
+### LLM tracing / prompt tracking
+**Runbook:** `mlflow/create-llm-trace`, `mlflow/manage-prompts`
+→ dashboard: `.../develop-train/mlflow/experiments?workspace={ns}`
+
+Matches: "trace LLM calls", "log prompts and responses", "LLM observability",
+"track my prompt templates", "prompt registry", "prompt versioning",
+"OpenAI tracing", "LangChain tracing", "trace my LLM application"
+
+---
+
+### Projects / namespaces
+**Runbook:** `projects/create-project`, `projects/add-user-to-project`, `projects/create-s3-connection`
+→ dashboard: `.../projects/{ns}`
+
+Matches: "create a data science project", "create a new project", "create a namespace",
+"I don't have a project", "add a user to my project", "share my project",
+"give someone access", "project permissions", "add an S3 connection",
+"create a data connection", "connect to S3", "MinIO connection", "object storage connection"
+
+---
+
+### Cluster setup — enabling components
+**Runbook:** `cluster/full-stack-setup` (everything) or individual enables below
+
+Matches for full setup: "set up everything", "fresh cluster setup", "configure ODH from scratch",
+"enable all components", "I just installed ODH and need to configure it"
+
+| Component the user mentions | Runbook |
+|---|---|
+| KServe, model serving not working, InferenceService CRD missing | `cluster/enable-kserve` |
+| Pipelines operator, DSP, DSPA not found | `cluster/enable-pipelines` |
+| TrustyAI operator not installed | `cluster/enable-trustyai` |
+| Model registry operator | `cluster/enable-model-registry` |
+| CodeFlare, Ray, Kueue, distributed workloads | `cluster/enable-codeflare` |
+| Training operator, PyTorchJob CRD | `cluster/enable-training-operator` |
+| Feature store, Feast | `cluster/enable-feature-store` |
+| Perses, observability dashboard | `observability/enable-perses-dashboard` |
+| Culler, idle notebook timeout | `cluster/configure-culler` |
+| Group settings, who can access the dashboard | `cluster/configure-group-settings` |
+| Hardware profiles, accelerator profiles | `cluster/create-hardware-profile` |
+| Custom connection type | `cluster/create-connection-type` |
+| Storage classes | `cluster/configure-storage-classes` |
+| Cluster-wide settings | `cluster/configure-cluster-settings` |
+
+---
+
+### ROSA / OpenShift on AWS
+**Runbook:** `rosa/install-rhoai-stable`, `rosa/install-rhoai-prerelease`, `rosa/setup-gpu-machinepool`,
+`rosa/verify-rhoai-install`, `rosa/fix-imagestream-registry`, `rosa/prepare-registry-credentials`
+
+Matches: "install RHOAI on ROSA", "set up RHOAI on AWS", "pre-release RHOAI",
+"install a specific RHOAI version", "nightly build", "RC install", "FBC image",
+"add GPU nodes to ROSA", "GPU machinepool", "imagestream 401 error",
+"registry.redhat.io error", "pull secret", "Kyverno workaround",
+"verify my RHOAI installation", "is RHOAI installed correctly"
+
+---
+
+### GPU / accelerators
+**Runbook:** `gpu/install-gpu-operator`, `gpu/add-gpu-node-ocm`, `gpu/verify-gpu-available`
+
+Matches: "install GPU operator", "NVIDIA GPU operator", "add a GPU node", "GPU not available",
+"no GPU nodes", "nvidia.com/gpu not showing", "NFD", "node feature discovery",
+"accelerator not working", "GPU time slicing", "verify GPU is visible"
+
+---
+
+### Dependencies (auto-provisioned, users rarely ask directly)
+These are run automatically when needed, but users might ask:
+- "I need MinIO" / "S3 storage for dev" → `dependencies/provision-minio`
+- "create an S3 connection for me" → `dependencies/provision-s3-connection`
+- "set up a pipeline server in my project" → `dependencies/provision-pipeline-server`
+- "I need PostgreSQL with pgvector" → `dependencies/provision-postgresql-pgvector`
+
+---
+
+### What's NOT covered yet
+
+If the user asks for any of the following, no runbook exists. Use the **No runbook found** protocol below.
+
+- Fine-tuning / LoRA training with dataset preparation
+- Model serving with token authentication (basic deploy works, auth config is partial)
+- OpenShift GitOps / ArgoCD integration for ODH resources
+- Cluster upgrade or ODH operator upgrade
+- Multi-cluster / federation setup
+- Cost allocation, quota management, resource limits
+- Building custom notebook images (BYON adds them, but not build pipelines)
+- Batch inference jobs
+- NVIDIA NIM serving
+- LlamaStack integration
+- A/B testing / canary traffic splitting in detail
+- Serverless model serving (KNative) — needs Service Mesh + Serverless operators
+- Data pipeline ETL (KFP components for data prep)
+
+---
+
+### No runbook found
+
+If the user's request doesn't match anything above, respond with:
+
+---
+I don't have a runbook for that yet.
+
+Here's what's available: `odh list` shows all 66 runbooks, or ask me about a specific area.
+
+If you'd like this added:
+- **Request it:** https://github.com/DaoDaoNoCode/odh-runbooks/issues/new — describe what you want to set up and what the expected dashboard page/outcome is
+- **Contribute it:** Generate a draft with `odh generate <component> "<task>"`, test it on a real cluster, and open a PR. See [CONTRIBUTING.md](CONTRIBUTING.md) for the runbook schema.
+---
 
 ---
 

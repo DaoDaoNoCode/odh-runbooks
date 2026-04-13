@@ -168,7 +168,7 @@ steps:
         spec:
           replicas: 1
           providers:
-            - lm_evaluation_harness
+            - lm-evaluation-harness
             - garak
           collections:
             - leaderboard-v2
@@ -185,6 +185,35 @@ steps:
       poll_interval: "10s"
       on_fail: STOP
     rollback: "oc delete evalhub {{ evalhub_instance_name }} -n {{ project_namespace }}"
+
+  - id: wait-evalhub-url
+    confidence: doc-derived
+    description: >
+      Wait for the EvalHub operator to populate status.url in the CR.
+      The dashboard BFF reads status.url to know where to proxy API calls.
+      Without it the dashboard cannot reach the EvalHub and shows "No existing
+      evaluation runs" even when jobs exist. The operator sets this after the
+      EvalHub service is fully ready (may take 15-30 seconds after phase=Ready).
+    action:
+      type: query
+      command: |
+        for i in $(seq 1 24); do
+          URL=$(oc get evalhub {{ evalhub_instance_name }} -n {{ project_namespace }}             -o jsonpath='{.status.url}' 2>/dev/null)
+          if [ -n "$URL" ]; then
+            echo "status.url: $URL"
+            exit 0
+          fi
+          echo "[$i/24] Waiting for status.url to be populated..."
+          sleep 5
+        done
+        echo "WARNING: status.url not set after 2 minutes — dashboard BFF may not find this instance"
+        echo "Check: oc get evalhub {{ evalhub_instance_name }} -n {{ project_namespace }} -o jsonpath='{.status}'"
+      store_as: evalhub_status_url
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
 
   - id: verify-evalhub-dashboard-visibility
     confidence: doc-derived
@@ -402,20 +431,22 @@ steps:
       Public — no S3, no credentials, no connection secret needed.
       Skipped if an existing model URL was resolved in the previous step.
 
-      GPU detection: check for GPU nodes first.
-      - If GPU nodes exist: use vllm-cuda-runtime with GPU resources
-      - If no GPU nodes: use vllm-cpu-runtime with the PUBLIC image
-        (quay.io/rh-aiservices-bu/vllm-cpu-openai-ubi9:0.3)
-        and size resources to what is ACTUALLY AVAILABLE on nodes.
+      ALWAYS CHECK GPU AVAILABILITY FIRST before choosing runtime:
+        GPU_NODES=$(oc get nodes -l nvidia.com/gpu.present=true --no-headers 2>/dev/null | wc -l)
 
-      Before deploying CPU: check free CPU/memory on nodes:
-        oc describe nodes | grep -A 5 "Allocated resources"
-      Use conservative defaults that fit: cpu="2", memory="4Gi"
-      For smallest model (qwen2.5-0.5b): max-model-len is 2048 (not 4096).
+      If GPU nodes exist: use vllm-cuda-runtime with GPU resources.
+      If NO GPU nodes: skip the cuda template entirely. Use the public CPU image directly:
+        quay.io/rh-aiservices-bu/vllm-cpu-openai-ubi9:0.3
+        Required args: --port=8080, --model=/mnt/models, --served-model-name={{ model_name }}
+        Required env: VLLM_CPU_KVCACHE_SPACE=2
+        Resources: cpu="2", memory="10Gi" limits
+        For qwen2.5-0.5b: --max-model-len=2048 (the model's actual max)
 
-      If the vllm-cuda-runtime-template image fails with ImagePullBackOff
-      (quay.io/rhoai/*): delete both ServingRuntime + InferenceService and
-      recreate using the public CPU runtime image instead.
+      Do NOT attempt the RHOAI subscription image (quay.io/rhoai/*) then fall back —
+      check GPU first, choose the right path directly. This saves 2+ minutes.
+
+      --served-model-name={{ model_name }} is always required so the model name
+      matches what eval runners expect.
     pre_check:
       command: "echo '{{ model_resolution }}' | grep -q '^DEPLOY:' && echo needed || echo skip"
       expected: "skip"
@@ -629,11 +660,11 @@ steps:
     description: Get the EvalHub service route
     action:
       type: query
-      command: "oc get route -n {{ project_namespace }} -l app={{ evalhub_instance_name }} -o jsonpath='{.items[0].spec.host}' 2>/dev/null"
+      command: "oc get route {{ evalhub_instance_name }} -n {{ project_namespace }} -o jsonpath='{.spec.host}' 2>/dev/null"
       store_as: evalhub_host
     post_check:
       assert: evalhub_host is not empty
-      command: "oc get route -n {{ project_namespace }} -l app={{ evalhub_instance_name }} -o jsonpath='{.items[0].spec.host}'"
+      command: "oc get route {{ evalhub_instance_name }} -n {{ project_namespace }} -o jsonpath='{.spec.host}'"
       expected_min: 1
       timeout: "60s"
       on_fail: STOP

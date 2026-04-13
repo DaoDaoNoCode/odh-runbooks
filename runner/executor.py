@@ -99,15 +99,16 @@ class RunbookExecutor:
             f"[bold]{self.runbook.name}[/bold]\n\n{self.runbook.description}\n\n"
             f"Mode: [green]implement[/green] | "
             f"Confidence: [{self._confidence_color(self.runbook.confidence_overall)}]"
-            f"{self.runbook.confidence_overall}[/]",
+            f"{self.runbook.confidence_overall.value if hasattr(self.runbook.confidence_overall, 'value') else self.runbook.confidence_overall}[/]",
             title="[cyan]ODH Runbook Executor[/cyan]"
         ))
 
-        if self.params:
+        non_empty = {k: v for k, v in self.params.items() if v is not None and str(v).strip() != ""}
+        if non_empty:
             table = Table(show_header=True)
             table.add_column("Parameter")
             table.add_column("Value")
-            for k, v in self.params.items():
+            for k, v in non_empty.items():
                 table.add_row(k, str(v))
             console.print(table)
 
@@ -148,12 +149,13 @@ class RunbookExecutor:
                 if self.rollback_log:
                     console.print("\n[dim]Resources created before failure (safe to keep or delete):[/dim]")
                     for e in self.rollback_log:
-                        console.print(f"  [dim]• {e['rollback']}[/dim]")
+                        rendered_rb = self.render(e['rollback'])
+                        console.print(f"  [dim]• {rendered_rb}[/dim]")
 
                 console.print("\n[dim]Next steps:[/dim]")
                 console.print(f"  [dim]• Check cluster state:  odh doctor[/dim]")
                 runbook_id = self.runbook_path or self.runbook.name
-                param_str = " ".join(f"-p {k}={v}" for k, v in self.params.items())
+                param_str = " ".join(f"-p {k}={v}" for k, v in self.params.items() if v is not None and str(v).strip() != "")
                 console.print(f"  [dim]• Re-check what exists: odh run {runbook_id} --mode qa {param_str}[/dim]")
                 console.print(f"  [dim]• Ask for help:         odh ask \"why did {step.id} fail?\"[/dim]")
                 return False

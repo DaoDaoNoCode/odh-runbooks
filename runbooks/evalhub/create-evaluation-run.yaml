@@ -229,7 +229,7 @@ steps:
       Requires 1 GPU (for vLLM runtime).
     pre_check:
       command: "echo '{{ model_resolution }}' | grep -q '^DEPLOY:' && echo needed || echo skip"
-      expected: "needed"
+      expected: "skip"
       if_already_true: skip
       on_fail: STOP
     action:
@@ -291,7 +291,7 @@ steps:
           echo "{{ model_resolution }}" | sed 's/^EXISTING://'
         else
           oc get inferenceservice {{ model_name }} -n {{ project_namespace }} \
-            -o jsonpath="{.status.url}" 2>/dev/null
+            -o jsonpath="{.status.url}" 2>/dev/null || echo ""
         fi
       store_as: model_url
     post_check:

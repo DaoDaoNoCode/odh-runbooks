@@ -1,8 +1,22 @@
 name: cluster-enable-kserve
 description: >
-  Enable KServe single-model serving in the DataScienceCluster.
-  KServe is used for deploying large models (LLMs, transformers) with dedicated resources.
-  After enabling, users can deploy InferenceServices from any project.
+  Enable KServe in Standard mode (RawDeployment) in the DataScienceCluster.
+  Standard mode uses Kubernetes Deployments/Services/Routes without Serverless/Knative.
+  This is the correct mode for RHOAI without Service Mesh or Serverless operators.
+
+  DSC configuration applied (from docs: RHOAIENG-24906):
+    defaultDeploymentMode: RawDeployment  — all InferenceServices use Raw by default
+    rawDeploymentServiceConfig: Headed    — normal K8s load balancing over replicas
+    serving.managementState: Removed      — Knative Serving disabled (not needed)
+
+  DSCI requirement: serviceMesh.managementState should be Removed for Standard mode.
+  If you need Advanced mode (scale-to-zero via Knative): set serving.managementState: Managed
+  and install Red Hat Serverless and Service Mesh operators first.
+
+  BUILT-IN ServingRuntimes provided by RHOAI (do not create manually):
+    GPU: "vLLM NVIDIA GPU ServingRuntime for KServe"   — reference by name in InferenceService
+    CPU: Based on "vLLM CPU (ppc64le/s390x) ServingRuntime for KServe" — EXPERIMENTAL, not supported
+         Must be duplicated and modified for amd64 (image: quay.io/rh-aiservices-bu/vllm-cpu-openai-ubi9:0.3)
   HOW THE OPERATOR WORKS (opendatahub-operator):
   Patching managementState to 'Managed' in DSC is the ONLY action needed here.
   The opendatahub-operator automatically creates ALL child resources:
@@ -52,9 +66,12 @@ steps:
       type: patch
       target: "$(oc get dsc -o name | head -1)"
       patch: >
-        {"spec":{"components":{"kserve":{"managementState":"Managed",
-        "serving":{"managementState":"Managed",
-        "ingressGateway":{"certificate":{"type":"SelfSigned"}}}}}}}
+        {"spec":{"components":{"kserve":{
+          "managementState":"Managed",
+          "defaultDeploymentMode":"RawDeployment",
+          "rawDeploymentServiceConfig":"Headed",
+          "serving":{"managementState":"Removed","name":"knative-serving"}
+        }}}}
       dry_run: false
     post_check:
       command: "oc get dsc -o jsonpath='{.items[0].spec.components.kserve.managementState}'"

@@ -258,11 +258,16 @@ steps:
               storageUri: "oci://{{ model_resolution | replace('DEPLOY:', '') }}"
               resources:
                 requests:
-                  cpu: "4"
-                  memory: "8Gi"
+                  cpu: "1"
+                  memory: "10Gi"
                   nvidia.com/gpu: "1"
                 limits:
+                  memory: "10Gi"
                   nvidia.com/gpu: "1"
+              args:
+                - "--dtype=half"
+                - "--max-model-len=8192"
+                - "--gpu-memory-utilization=0.95"
     post_check:
       command: "oc get inferenceservice {{ model_name }} -n {{ project_namespace }} -o jsonpath='{.status.modelStatus.states.activeModelState}' 2>/dev/null"
       expected: "Loaded"

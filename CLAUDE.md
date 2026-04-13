@@ -615,6 +615,18 @@ If `kserve-container` logs are empty after 5+ minutes → the container may be w
 
 **CPU model load times (rough estimates):** qwen2.5-0.5b ≈ 5-10 min, llama-3.2-1b ≈ 15 min, granite-3.3-2b ≈ 25-30 min. If `kserve-container` shows active output within these windows — it is working normally.
 
+**If `kserve-container` logs show `Application startup complete` but the pod stays `1/2 Running`:**
+The server is up but the readiness probe can't reach it — almost always a port mismatch.
+```bash
+# Check what port vLLM is actually serving on:
+oc logs <pod> -n <ns> -c kserve-container | grep "Starting vLLM API server"
+# e.g. "on http://0.0.0.0:8000" → vLLM is on 8000, KServe probes 8080 → mismatch
+
+# Fix: ServingRuntime must declare port 8080 AND pass --port=8080 to vLLM
+# Also: --model=/mnt/models ensures vLLM reads the modelcar-provided model files,
+# not its own default (you may see facebook/opt-125m if this arg is missing)
+```
+
 ---
 
 ## Key technical facts

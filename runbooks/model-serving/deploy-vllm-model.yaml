@@ -448,7 +448,9 @@ steps:
            Standard fix:
              oc delete servingruntime vllm-cpu-runtime -n {{ project_namespace }} 2>/dev/null || true
              oc delete inferenceservice {{ model_name }} -n {{ project_namespace }} 2>/dev/null || true
-           Then recreate with the public image by applying this ServingRuntime:
+           Then recreate with the public image. CRITICAL: must set --port=8080 (KServe probes 8080,
+           vLLM defaults to 8000 — port mismatch causes permanent 1/2 Running).
+           Also must set --model=/mnt/models so vLLM reads the modelcar-provided files.
              apiVersion: serving.kserve.io/v1alpha1
              kind: ServingRuntime
              metadata:
@@ -464,9 +466,13 @@ steps:
                    image: quay.io/rh-aiservices-bu/vllm-cpu-openai-ubi9:0.3
                    ports:
                      - containerPort: 8080
+                       protocol: TCP
+                   args:
+                     - "--port=8080"
+                     - "--model=/mnt/models"
                    resources:
-                     requests: {cpu: "4", memory: "6Gi"}
-                     limits: {memory: "8Gi"}
+                     requests: {cpu: "2", memory: "4Gi"}
+                     limits: {memory: "6Gi"}
            Then redeploy the InferenceService referencing this runtime.
         2. Public image with wrong URI: verify the OCI URI is correct.
            oc describe pod -l serving.kserve.io/inferenceservice={{ model_name }} -n {{ project_namespace }} | grep "Failed to pull"

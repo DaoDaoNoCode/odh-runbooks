@@ -1,92 +1,83 @@
-# ODH Runbook Tool
+# /odh — ODH Runbook Executor
 
-Use this skill when someone wants to set up any ODH/RHOAI component or environment.
+<instructions>
+The user wants to set up an ODH/RHOAI component or make a dashboard page work.
+Your job: read the right runbook, execute it on the cluster, return a working dashboard link.
 
-## How to use
+## Step 1 — Identify what they want
 
-Claude executes runbooks agentically — reads the runbook as a reference, checks cluster state,
-fetches source repos when unsure, and applies only standard fixes. No `--mode` flags needed.
+Map their request to a runbook. Common cases:
+- "set up EvalHub / create eval run" → `evalhub/create-evaluation-run`
+- "deploy a vLLM model" → `model-serving/deploy-vllm-model`
+- "create a workbench / notebook" → `workbenches/create-workbench`
+- "set up pipelines" → `pipelines/create-pipeline-server`
+- "deploy from model registry" → `model-registry/deploy-from-registry`
+- "enable KServe / model serving" → `cluster/enable-kserve`
+- "install RHOAI on ROSA" → `rosa/install-rhoai-stable` or `rosa/install-rhoai-prerelease`
+- "set up everything" → `cluster/full-stack-setup`
 
+If unclear, run `odh list` or ask one question: "Which namespace do you want this in?"
+
+## Step 2 — Get required parameters
+
+Read `runbooks/<component>/<name>.yaml` and check the `parameters:` section.
+
+For `project_namespace`, discover it:
 ```bash
-odh start                              # guided onboarding — asks what you want to accomplish
-odh wizard <runbook>                   # interactive wizard — collect params, then execute
-odh run <runbook> -p key=value         # execute directly
-odh run <runbook> --dry-run -p ...     # Claude reviews state, no changes made
-odh doctor                             # check what's installed on the cluster
-odh list --workflow                    # see runbooks grouped by goal
-odh show <runbook>                     # preview steps and source repos
-```
-
-## Common workflows
-
-**Set up EvalHub (zero S3 config needed):**
-```bash
-odh wizard evalhub/create-evaluation-run
-# Only needs: project_namespace
-# Claude auto-deploys model from OCI catalog, no S3 or credentials required
-```
-
-**Deploy a vLLM model:**
-```bash
-odh wizard model-serving/deploy-vllm-model
-# Needs: project_namespace, model_name
-# GPU required; supports built-in NVIDIA GPU runtime or experimental CPU
-```
-
-**Install RHOAI pre-release on ROSA:**
-```bash
-odh wizard rosa/install-rhoai-prerelease
-# Needs: FBC image digest from team release channel
-# Handles Kyverno pull secret workaround automatically
-```
-
-**Full environment setup from scratch:**
-```bash
-odh start
-# No parameters needed — guides interactively through all components
-```
-
-**Check cluster health:**
-```bash
-odh doctor
-# Shows what's installed, what's missing, what can be auto-provisioned
-```
-
-## When parameters are unknown
-
-Run the wizard — it discovers valid values from the cluster:
-```bash
-odh wizard <runbook-name>
-```
-
-Or show what parameters a runbook needs:
-```bash
-odh show <runbook-name>
-```
-
-Or check what's available:
-```bash
-# Find available namespaces
 oc get namespace -l opendatahub.io/dashboard=true --no-headers -o jsonpath='{.items[*].metadata.name}'
-
-# Find available models in namespace
-oc get inferenceservice -n <namespace> --no-headers
 ```
 
-## Troubleshooting
+If the user provided a namespace, use it. If not, list the options and ask.
 
-If Claude cannot complete a step with a standard fix, it will explain:
-- What the error is
-- Which source repos it checked
-- Why no standard fix was found
-- What the user must do manually
+Most other parameters have defaults in the runbook — use them unless the user says otherwise.
 
-To review cluster state without making changes:
+## Step 3 — Execute the runbook
+
+Read the runbook YAML. For each step:
+1. Run the `pre_check` command — if it shows the resource exists, skip the step
+2. Check `requires:` — if a dependency is missing, run the resolver runbook first
+3. Apply the `action` (apply manifest, run command, etc.) — render `{{ variables }}` first
+4. Run the `post_check` to verify it worked
+
+**Before applying any non-obvious configuration:** fetch the relevant repo from `source_repos`
+to verify the correct approach. Never guess. Never improvise.
+
+The runbook's `known_bad_patterns` section shows what to NEVER do — check it before acting.
+
+## Step 4 — Return the dashboard link
+
+Every runbook ends with a `return:` value that includes a dashboard URL. Give the user:
+- The full clickable URL to the specific dashboard page
+- A quick test command if applicable (curl for model endpoints, etc.)
+
+Dashboard URL patterns (your cluster's dashboard host is the prefix):
 ```bash
-odh run <runbook> --dry-run -p project_namespace=<ns>
+# Get the dashboard host:
+oc get route rhods-dashboard -n redhat-ods-applications -o jsonpath='{.spec.host}' 2>/dev/null || \
+oc get route rhods-dashboard -n opendatahub -o jsonpath='{.spec.host}' 2>/dev/null
 ```
 
-To see what a runbook does before running it:
-```bash
-odh show <runbook-name>
-```
+| Feature | Dashboard path |
+|---|---|
+| EvalHub runs | `/evaluation/{ns}` |
+| Deployed models | `/ai-hub/deployments/{ns}` |
+| Pipelines | `/develop-train/pipelines/definitions/{ns}` |
+| Pipeline runs | `/develop-train/pipelines/runs/{ns}/runs/{runId}` |
+| Schedules | `/develop-train/pipelines/runs/{ns}/schedules` |
+| Workbenches | `/projects/{ns}` → Workbenches tab |
+| Model Registry | `/ai-hub/models/registry/{registryName}` |
+| MLflow experiments | `/develop-train/mlflow/experiments?workspace={ns}` |
+| Distributed workloads | `/observe-monitor/workload-metrics/workload-status/{ns}` |
+| Chat playground | `/playground/{ns}` |
+| Project detail | `/projects/{ns}` |
+
+## If something fails
+
+Check the `on_fail_hint` in the runbook step. Then:
+1. Look at `source_repos` — fetch the relevant file to find the correct approach
+2. Check `known_bad_patterns` — is this a documented mistake?
+3. Run `oc describe` on the failing resource to get the actual error
+4. If no standard fix exists: explain what you tried, what you checked, and what the user needs to do manually
+
+Do NOT create workarounds. Only apply fixes that match what the official source code says.
+</instructions>

@@ -504,16 +504,46 @@ Stop immediately — retrying the same image URI will not fix an image pull erro
 Check the OCI URI in the InferenceService manifest. Verify registry is accessible.
 `oc describe pod -l serving.kserve.io/inferenceservice=<model> -n <ns> | grep "Failed to pull"`
 
+### CrashLoopBackOff / OOMKilled — check logs, attempt one standard fix
+
+These conditions mean the container started but is crashing. Unlike Unschedulable/ImagePullBackOff,
+these are often fixable. **Pull the logs, read them, apply at most one clear standard fix.**
+
+```bash
+# Get logs (try both container names used by KServe)
+oc logs -l serving.kserve.io/inferenceservice=<model> -n <ns> --tail=60
+oc logs -l serving.kserve.io/inferenceservice=<model> -n <ns> -c kserve-container --tail=60
+```
+
+**Common fixable log errors and their standard fixes:**
+
+| Log shows | Root cause | Standard fix |
+|---|---|---|
+| `killed` / `OOMKilled` in events | Not enough memory for the model | Reduce `--max-model-len` to 4096 or 2048, or use a smaller model |
+| `RuntimeError: bfloat16 is not supported` | Wrong dtype for GPU type | Change `--dtype=half` → `--dtype=bfloat16`, or remove `--dtype` |
+| `no module named vllm` / import error | Wrong container image | Check runtime image — likely wrong ServingRuntime |
+| `model not found` / path error | Wrong storageUri | Verify `oc get inferenceservice -o yaml | grep storageUri` |
+| `CUDA out of memory` | GPU VRAM too small | Reduce `--gpu-memory-utilization` to 0.85, or reduce `--max-model-len` |
+
+**Principle:** Look at the log, identify the single clearest root cause, apply the minimum
+standard fix from the table above. Do not stack multiple changes at once.
+If the log shows an error not in this table or the cause is unclear — show the log and stop.
+
+**Never:** patch around the error with environment hacks, skip validation, or modify operator-owned resources.
+
 ### Polling loop pattern — check both state AND pod health
 When waiting for a model to load, check both every iteration:
 ```bash
-# Bad: only checks InferenceService state (misses terminal pod conditions)
-STATE=$(oc get inferenceservice ... -o jsonpath='{.status.modelStatus.states.activeModelState}')
+# Check InferenceService state
+STATE=$(oc get inferenceservice <model> -n <ns> -o jsonpath='{.status.modelStatus.states.activeModelState}')
 
-# Good: also check pod conditions every iteration
-POD=$(oc get pods -l serving.kserve.io/inferenceservice=<model> -n <ns> --no-headers | head -1)
-POD_STATUS=$(echo "$POD" | awk '{print $3}')
-# If ImagePullBackOff or Unschedulable → stop immediately, don't wait 15 minutes
+# Also check pod — stop fast on terminal conditions
+POD_NAME=$(oc get pods -l serving.kserve.io/inferenceservice=<model> -n <ns> --no-headers | head -1 | awk '{print $1}')
+POD_STATUS=$(oc get pod $POD_NAME -n <ns> --no-headers | awk '{print $3}')
+
+# Terminal → stop: Unschedulable, ImagePullBackOff, CrashLoopBackOff
+# Possibly fixable → check logs: CrashLoopBackOff, OOMKilled
+# Keep waiting → genuinely progressing: Init, ContainerCreating, Running
 ```
 
 ---

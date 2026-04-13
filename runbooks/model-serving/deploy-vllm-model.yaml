@@ -299,6 +299,16 @@ steps:
          This is a terminal condition — retrying will not fix it.
          Stop immediately and fix the image URI or registry access.
 
+      3. CRASHLOOPBACKOFF / OOMKilled — container started but is crashing.
+         Detected from: containerStatuses[].state.waiting.reason + lastState.terminated.reason.
+         Pull the container logs and diagnose. Many are fixable with a single standard change:
+         - OOMKilled → reduce --max-model-len (try 4096 or 2048) or use a smaller model
+         - "RuntimeError: dtype" / "bfloat16 not supported" → change --dtype=half or remove --dtype
+         - "model format" / "runtime not found" → fix modelFormat.name case (vLLM not vllm)
+         - Any other clear config error → apply the minimum standard fix, then retry
+         Principle: look at the log, identify the single root cause, apply the standard fix.
+         If the log is unclear or the fix is non-obvious → stop and show the log to the user.
+
       If pod is in Init / PodInitializing / ContainerCreating / Running:
       it is making genuine progress → continue to the long wait.
     action:
@@ -348,6 +358,27 @@ steps:
           exit 0
         fi
 
+        # --- Check CrashLoopBackOff / OOMKilled ---
+        # These mean the container started but is crashing. Pull logs — many are fixable.
+        CRASH=$(oc get pod "$POD_NAME" -n {{ project_namespace }} \
+          -o jsonpath='{.status.containerStatuses[*].state.waiting.reason}' \
+          2>/dev/null | tr ' ' '\n' | grep -i CrashLoopBackOff | head -1)
+        OOM=$(oc get pod "$POD_NAME" -n {{ project_namespace }} \
+          -o jsonpath='{.status.containerStatuses[*].lastState.terminated.reason}' \
+          2>/dev/null | grep -i OOMKilled | head -1)
+
+        if [ -n "$CRASH" ] || [ -n "$OOM" ]; then
+          echo "POD CRASHING: CrashLoopBackOff=${CRASH} OOMKilled=${OOM}"
+          echo ""
+          echo "=== Container logs (last 60 lines) ==="
+          oc logs "$POD_NAME" -n {{ project_namespace }} --tail=60 2>/dev/null || \
+            oc logs "$POD_NAME" -n {{ project_namespace }} -c kserve-container --tail=60 2>/dev/null || \
+            echo "(no logs yet)"
+          echo ""
+          echo "pod-crashing"
+          exit 0
+        fi
+
         echo "Pod is progressing ($POD_STATUS) — proceeding to long wait"
         echo "ok"
       store_as: pod_scheduling_status
@@ -363,8 +394,12 @@ steps:
         UNSCHED=$(oc get pod "$POD_NAME" -n {{ project_namespace }} \
           -o jsonpath='{.status.conditions[?(@.reason=="Unschedulable")].message}' \
           2>/dev/null)
+        CRASH=$(oc get pod "$POD_NAME" -n {{ project_namespace }} \
+          -o jsonpath='{.status.containerStatuses[*].state.waiting.reason}' \
+          2>/dev/null | tr ' ' '\n' | grep -i CrashLoopBackOff | head -1)
         if [ -n "$IMG" ]; then echo "imagepull-error"
         elif [ -n "$UNSCHED" ]; then echo "unschedulable"
+        elif [ -n "$CRASH" ]; then echo "pod-crashing"
         else echo "ok"; fi
       expected: "ok"
       timeout: "90s"
@@ -380,6 +415,14 @@ steps:
       IMAGEPULLBACKOFF — terminal, will never self-heal:
         Verify the OCI URI is correct and the registry is accessible.
         oc describe pod -l serving.kserve.io/inferenceservice={{ model_name }} -n {{ project_namespace }} | grep -A3 "Failed to pull"
+      CRASHLOOPBACKOFF / OOMKILLED — check logs and apply one standard fix:
+        oc logs -l serving.kserve.io/inferenceservice={{ model_name }} -n {{ project_namespace }} --tail=60
+        OOMKilled fix: patch the InferenceService args to add --max-model-len=4096
+          oc patch inferenceservice {{ model_name }} -n {{ project_namespace }} --type=json \
+            -p '[{"op":"add","path":"/spec/predictor/model/args/-","value":"--max-model-len=4096"}]'
+          Or use a smaller model and recreate.
+        dtype errors: change --dtype in args (half → bfloat16, or remove --dtype)
+        If the log is unclear: show the log output and stop — do not guess.
 
   - id: get-model-url
     confidence: doc-derived

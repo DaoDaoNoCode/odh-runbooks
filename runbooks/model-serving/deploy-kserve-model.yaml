@@ -158,209 +158,102 @@ steps:
   - id: check-pod-scheduling
     confidence: doc-derived
     description: >
-      Early failure detection ~45 seconds after InferenceService creation.
-      Catches the two terminal conditions that will NEVER self-resolve — do not
-      continue waiting 15 minutes if either is present:
+      Wait 45 seconds after deployment to catch terminal failures early instead
+      of polling blindly for 15 minutes.
 
-      1. UNSCHEDULABLE — no node has enough resources to schedule the pod.
-         Detected from: pod status condition reason=Unschedulable.
-         Act immediately:
-         - If GPU insufficient (no GPU nodes / all full): delete the InferenceService
-           and ServingRuntime, then recreate using a CPU runtime with a smaller model.
-           Standard CPU runtimes: vllm-cpu-runtime-template, vllm-cpu-x86-runtime-template
-           Smallest safe CPU model: qwen2.5-0.5b-instruct (~1 GB, needs ~6 Gi memory)
-         - If CPU/memory insufficient: cluster is full — use a smaller model or wait.
+      Always tracks the NEWEST pod — during a rolling update the old crashing
+      pod is irrelevant; check the one being created.
 
-      2. IMAGEPULLBACKOFF / ErrImagePull — the image cannot be pulled.
-         Detected from: pod containerStatuses[].state.waiting.reason.
-         IMPORTANT: Not always terminal — check WHICH image is failing:
-         - quay.io/rhoai/* or registry.redhat.io/rh* → subscription-gated RHOAI image.
-           Standard fix: delete ServingRuntime + InferenceService, recreate with the
-           public CPU alternative: quay.io/rh-aiservices-bu/vllm-cpu-openai-ubi9:0.3
-           This is the documented non-subscription CPU runtime approach.
-         - Public registry image (quay.io/rh-aiservices-bu, quay.io/redhat-ai-services, etc.)
-           → truly terminal if URI is wrong. Verify the image reference and stop.
+      Three conditions caught immediately:
+        UNSCHEDULABLE: no node can schedule the pod — diagnose resources, fix.
+        IMAGEPULLBACKOFF: image unreachable — check which image and why.
+        CRASHLOOPBACKOFF/OOMKILLED: container crashes — pull kserve-container
+          logs (not modelcar, which is always silent) and diagnose the cause.
 
-      3. CRASHLOOPBACKOFF / OOMKilled — container started but is crashing.
-         Detected from: containerStatuses[].state.waiting.reason + lastState.terminated.reason.
-         Pull the container logs and diagnose. Many are fixable with a single standard change:
-         - OOMKilled → reduce --max-model-len (try 4096 or 2048) or use a smaller model
-         - "RuntimeError: dtype" / "bfloat16 not supported" → change --dtype=half or remove --dtype
-         - "model format" / "runtime not found" → fix modelFormat.name case (vLLM not vllm)
-         - Any other clear config error → apply the minimum standard fix, then retry
-         Principle: look at the log, identify the single root cause, apply the standard fix.
-         If the log is unclear or the fix is non-obvious → stop and show the log to the user.
-
-      If pod is in Init / PodInitializing / ContainerCreating / Running:
-      it is making genuine progress → continue to the long wait.
+      If the pod is Running with a failing readiness probe: normal during model
+      loading. Keep waiting. The probe passes once the server is ready to serve.
     action:
       type: query
       command: |
-        echo "Waiting 45s for scheduling attempt..."
         sleep 45
-
-        # Always track the NEWEST pod — during a rollout after a patch, old crashing
-        # pods are irrelevant. Sorting by creationTimestamp and taking the last one.
-        POD_LINE=$(oc get pods -n {{ project_namespace }} \
+        POD=$(oc get pods -n {{ project_namespace }} \
           -l serving.kserve.io/inferenceservice={{ model_name }} \
           --no-headers --sort-by=.metadata.creationTimestamp 2>/dev/null | tail -1)
+        [ -z "$POD" ] && echo "ok" && exit 0
 
-        if [ -z "$POD_LINE" ]; then
-          echo "no pod yet — InferenceService controller still processing"
-          echo "ok"
-          exit 0
-        fi
+        NAME=$(echo "$POD" | awk '{print $1}')
+        echo "Pod: $NAME  Status: $(echo "$POD" | awk '{print $3}')"
 
-        POD_NAME=$(echo "$POD_LINE" | awk '{print $1}')
-        POD_STATUS=$(echo "$POD_LINE" | awk '{print $3}')
-        echo "Pod (newest): $POD_NAME  Status: $POD_STATUS"
+        # Skip pods being terminated by a previous rollout
+        [ -n "$(oc get pod "$NAME" -n {{ project_namespace }} \
+          -o jsonpath='{.metadata.deletionTimestamp}' 2>/dev/null)" ] && \
+          echo "old pod terminating — new one starting" && echo "ok" && exit 0
 
-        # Skip if this is an old terminating pod (deletionTimestamp set)
-        IS_TERM=$(oc get pod "$POD_NAME" -n {{ project_namespace }} \
-          -o jsonpath='{.metadata.deletionTimestamp}' 2>/dev/null)
-        if [ -n "$IS_TERM" ]; then
-          echo "Newest pod is terminating — waiting for new pod to be created"
-          echo "ok"
-          exit 0
-        fi
-
-        # --- Check Unschedulable ---
-        UNSCHED=$(oc get pod "$POD_NAME" -n {{ project_namespace }} \
+        # Unschedulable
+        UNSCHED=$(oc get pod "$NAME" -n {{ project_namespace }} \
           -o jsonpath='{.status.conditions[?(@.reason=="Unschedulable")].message}' \
           2>/dev/null)
         if [ -n "$UNSCHED" ]; then
           echo "UNSCHEDULABLE: $UNSCHED"
-          echo ""
-          echo "=== Node resources ==="
           oc get nodes --no-headers 2>/dev/null | awk '{print $1, $4, $5}'
-          echo "GPU nodes:"
-          oc get nodes -l nvidia.com/gpu.present=true --no-headers 2>/dev/null || echo "  (none)"
-          echo "terminal-unschedulable"
-          exit 0
+          oc get nodes -l nvidia.com/gpu.present=true --no-headers 2>/dev/null || echo "(no GPU nodes)"
+          echo "unschedulable"; exit 0
         fi
 
-        # --- Check ImagePullBackOff (containers + init containers) ---
-        IMG_ERR=$(oc get pod "$POD_NAME" -n {{ project_namespace }} \
+        # ImagePullBackOff — show which image failed so the fix is obvious
+        IMGPULL=$(oc get pod "$NAME" -n {{ project_namespace }} \
           -o jsonpath='{.status.containerStatuses[*].state.waiting.reason} {.status.initContainerStatuses[*].state.waiting.reason}' \
           2>/dev/null | tr ' ' '\n' | grep -iE "ImagePullBackOff|ErrImagePull" | head -1)
-        if [ -n "$IMG_ERR" ]; then
-          echo "IMAGE PULL ERROR: $IMG_ERR"
-          # Extract the failing image name — critical for deciding if it's fixable
-          FAIL_IMG=$(oc describe pod "$POD_NAME" -n {{ project_namespace }} 2>/dev/null | \
-            grep -E "Failed to pull image" | head -3)
-          echo "$FAIL_IMG"
-          # Check if it's a subscription-gated image (quay.io/rhoai/ or registry.redhat.io/)
-          if echo "$FAIL_IMG" | grep -qE "quay\.io/rhoai/|registry\.redhat\.io/rh"; then
-            echo ""
-            echo "SUBSCRIPTION IMAGE: This image requires RHOAI subscription credentials."
-            echo "Standard fix: delete this ServingRuntime and recreate with the public CPU image."
-            echo "  Public alternative: quay.io/rh-aiservices-bu/vllm-cpu-openai-ubi9:0.3"
-            echo "  This is the documented approach in RHOAI devtools for CPU-only clusters."
-            echo "image-pull-subscription"
-          else
-            echo "terminal-imagepull"
-          fi
-          exit 0
+        if [ -n "$IMGPULL" ]; then
+          echo "IMAGE PULL ERROR: $IMGPULL"
+          oc describe pod "$NAME" -n {{ project_namespace }} 2>/dev/null | \
+            grep "Failed to pull" | head -3
+          echo "imagepull"; exit 0
         fi
 
-        # --- Check CrashLoopBackOff / OOMKilled ---
-        # These mean the container started but is crashing. Pull logs — many are fixable.
-        CRASH=$(oc get pod "$POD_NAME" -n {{ project_namespace }} \
-          -o jsonpath='{.status.containerStatuses[*].state.waiting.reason}' \
-          2>/dev/null | tr ' ' '\n' | grep -i CrashLoopBackOff | head -1)
-        OOM=$(oc get pod "$POD_NAME" -n {{ project_namespace }} \
-          -o jsonpath='{.status.containerStatuses[*].lastState.terminated.reason}' \
-          2>/dev/null | grep -i OOMKilled | head -1)
-
-        if [ -n "$CRASH" ] || [ -n "$OOM" ]; then
-          echo "POD CRASHING: CrashLoopBackOff=${CRASH} OOMKilled=${OOM}"
-          echo ""
-          echo "=== kserve-container logs (last 60 lines) ==="
-          # Always check kserve-container specifically — it is the actual model server.
-          # The modelcar container (OCI file server) is always silent by design.
-          oc logs "$POD_NAME" -n {{ project_namespace }} -c kserve-container --tail=60 2>/dev/null || \
-            oc logs "$POD_NAME" -n {{ project_namespace }} --tail=60 2>/dev/null || \
-            echo "(no logs yet — container may still be initializing)"
-          echo ""
-          echo "pod-crashing"
-          exit 0
+        # CrashLoopBackOff / OOMKilled — pull logs for diagnosis
+        CRASH=$(oc get pod "$NAME" -n {{ project_namespace }} \
+          -o jsonpath='{.status.containerStatuses[*].state.waiting.reason} {.status.containerStatuses[*].lastState.terminated.reason}' \
+          2>/dev/null | tr ' ' '\n' | grep -iE "CrashLoopBackOff|OOMKilled" | head -1)
+        if [ -n "$CRASH" ]; then
+          echo "CRASHING: $CRASH"
+          oc logs "$NAME" -n {{ project_namespace }} -c kserve-container --tail=40 2>/dev/null || \
+            oc logs "$NAME" -n {{ project_namespace }} --tail=40 2>/dev/null || \
+            echo "(no logs yet)"
+          echo "pod-crashing"; exit 0
         fi
 
-        echo "Pod is progressing ($POD_STATUS) — proceeding to long wait"
         echo "ok"
-      store_as: pod_scheduling_status
+      store_as: pod_health_status
     post_check:
       command: |
-        POD_NAME=$(oc get pods -n {{ project_namespace }} \
+        POD=$(oc get pods -n {{ project_namespace }} \
           -l serving.kserve.io/inferenceservice={{ model_name }} \
           --no-headers --sort-by=.metadata.creationTimestamp 2>/dev/null | tail -1 | awk '{print $1}')
-        if [ -z "$POD_NAME" ]; then echo "ok"; exit 0; fi
-        IMG=$(oc get pod "$POD_NAME" -n {{ project_namespace }} \
-          -o jsonpath='{.status.containerStatuses[*].state.waiting.reason} {.status.initContainerStatuses[*].state.waiting.reason}' \
-          2>/dev/null | tr ' ' '\n' | grep -iE "ImagePullBackOff|ErrImagePull" | head -1)
-        UNSCHED=$(oc get pod "$POD_NAME" -n {{ project_namespace }} \
-          -o jsonpath='{.status.conditions[?(@.reason=="Unschedulable")].message}' \
-          2>/dev/null)
-        CRASH=$(oc get pod "$POD_NAME" -n {{ project_namespace }} \
-          -o jsonpath='{.status.containerStatuses[*].state.waiting.reason}' \
-          2>/dev/null | tr ' ' '\n' | grep -i CrashLoopBackOff | head -1)
-        if [ -n "$IMG" ]; then echo "imagepull-error"
-        elif [ -n "$UNSCHED" ]; then echo "unschedulable"
-        elif [ -n "$CRASH" ]; then echo "pod-crashing"
-        else echo "ok"; fi
+        [ -z "$POD" ] && echo "ok" && exit 0
+        CRASH=$(oc get pod "$POD" -n {{ project_namespace }} \
+          -o jsonpath='{.status.containerStatuses[*].state.waiting.reason}' 2>/dev/null | \
+          tr ' ' '\n' | grep -iE "ImagePullBackOff|ErrImagePull|CrashLoopBackOff" | head -1)
+        UNSCHED=$(oc get pod "$POD" -n {{ project_namespace }} \
+          -o jsonpath='{.status.conditions[?(@.reason=="Unschedulable")].message}' 2>/dev/null)
+        [ -n "$CRASH" ] && echo "terminal" && exit 0
+        [ -n "$UNSCHED" ] && echo "unschedulable" && exit 0
+        echo "ok"
       expected: "ok"
       timeout: "90s"
       on_fail: STOP
     on_fail_hint: >
-      UNSCHEDULABLE — pod cannot be scheduled:
-        GPU nodes missing/full: delete the InferenceService and its ServingRuntime,
-          then recreate using a CPU runtime:
-          oc process -n redhat-ods-applications vllm-cpu-runtime-template | oc apply -n {{ project_namespace }} -f -
-          Use a small model: qwen2.5-0.5b-instruct (1 GB, needs ~6 Gi memory, ~4 CPU)
-        CPU/memory insufficient: use a smaller model or reduce resource requests.
-        Check resources: oc describe nodes | grep -A 5 "Allocated resources"
-      IMAGEPULLBACKOFF — two cases:
-        1. Subscription image (quay.io/rhoai/ or registry.redhat.io/rh*):
-           Not terminal — fixable with the public CPU alternative.
-           Standard fix:
-             oc delete servingruntime vllm-cpu-runtime -n {{ project_namespace }} 2>/dev/null || true
-             oc delete inferenceservice {{ model_name }} -n {{ project_namespace }} 2>/dev/null || true
-           Then recreate with the public image. CRITICAL: must set --port=8080 (KServe probes 8080,
-           vLLM defaults to 8000 — port mismatch causes permanent 1/2 Running).
-           Also must set --model=/mnt/models so vLLM reads the modelcar-provided files.
-             apiVersion: serving.kserve.io/v1alpha1
-             kind: ServingRuntime
-             metadata:
-               name: vllm-cpu-runtime
-               namespace: {{ project_namespace }}
-             spec:
-               multiModel: false
-               supportedModelFormats:
-                 - name: vLLM
-                   autoSelect: true
-               containers:
-                 - name: kserve-container
-                   image: quay.io/rh-aiservices-bu/vllm-cpu-openai-ubi9:0.3
-                   ports:
-                     - containerPort: 8080
-                       protocol: TCP
-                   args:
-                     - "--port=8080"
-                     - "--model=/mnt/models"
-                   resources:
-                     requests: {cpu: "2", memory: "4Gi"}
-                     limits: {memory: "6Gi"}
-           Then redeploy the InferenceService referencing this runtime.
-        2. Public image with wrong URI: verify the OCI URI is correct.
-           oc describe pod -l serving.kserve.io/inferenceservice={{ model_name }} -n {{ project_namespace }} | grep "Failed to pull"
-      CRASHLOOPBACKOFF / OOMKILLED — check logs and apply one standard fix:
-        oc logs -l serving.kserve.io/inferenceservice={{ model_name }} -n {{ project_namespace }} --tail=60
-        OOMKilled fix: patch the InferenceService args to add --max-model-len=4096
-          oc patch inferenceservice {{ model_name }} -n {{ project_namespace }} --type=json \
-            -p '[{"op":"add","path":"/spec/predictor/model/args/-","value":"--max-model-len=4096"}]'
-          Or use a smaller model and recreate.
-        dtype errors: change --dtype in args (half → bfloat16, or remove --dtype)
-        If the log is unclear: show the log output and stop — do not guess.
+      UNSCHEDULABLE: oc describe nodes | grep -A5 "Allocated resources"
+        No GPU nodes: use a CPU runtime with a small model.
+        No CPU/memory: reduce resource requests or use a smaller model.
+      IMAGEPULLBACKOFF: which image failed? (oc describe pod | grep "Failed to pull")
+        Subscription image (quay.io/rhoai/, registry.redhat.io/): use a public alternative.
+        Wrong URI: fix the image reference in the ServingRuntime or InferenceService.
+      CRASHLOOPBACKOFF — diagnose from the logs above. Common fixes:
+        Wrong port: add --port=8080 to ServingRuntime args (KServe probes 8080, vLLM defaults 8000)
+        Wrong model path: add --model=/mnt/models (reads from KServe's model mount, not vLLM default)
+        OOM: reduce --max-model-len or use a smaller model
+        dtype: change --dtype=half to --dtype=bfloat16 or remove it
 
   - id: get-model-url
     confidence: doc-derived

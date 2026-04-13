@@ -469,162 +469,48 @@ MLflow (`/develop-train/mlflow`):
 
 ## Pod scheduling — fail fast, don't wait 15 minutes
 
-When a model deployment step polls for `activeModelState=Loaded`, **always check pod conditions
-after the first 45 seconds**. Two terminal conditions that will NEVER self-resolve:
+When waiting for a model to load, always track the **newest pod** (rolling updates
+create new pods while old ones are still terminating — use `--sort-by=.metadata.creationTimestamp | tail -1`).
+Check **container state**, not readiness probe results.
 
-### Unschedulable — no node has sufficient resources
-```bash
-# Check for Unschedulable condition
-oc get pod -l serving.kserve.io/inferenceservice=<model> -n <ns> \
-  -o jsonpath='{.items[0].status.conditions[?(@.reason=="Unschedulable")].message}'
+### Three conditions to catch within 60 seconds
 
-# Check what resources nodes actually have
-oc get nodes --no-headers | awk '{print $1, $4, $5}'
-oc get nodes -l nvidia.com/gpu.present=true --no-headers || echo "(no GPU nodes)"
-```
-
-**If GPU requested but no GPU nodes:** this is the most common case. Standard fix:
-1. `oc delete inferenceservice <model> -n <ns>`
-2. `oc delete servingruntime vllm-cuda-runtime -n <ns>` (if created)
-3. Recreate with CPU runtime: `oc process -n redhat-ods-applications vllm-cpu-runtime-template | oc apply -n <ns> -f -`
-4. Use a small model: `qwen2.5-0.5b-instruct` (~1 GB, needs ~6 Gi memory, ~4 CPU)
-
-**If CPU/memory insufficient:** use a smaller model or reduce resource requests.
-Check: `oc describe nodes | grep -A 5 "Allocated resources"`
-
-### ImagePullBackOff / ErrImagePull — check WHICH image before deciding
-
-```bash
-# Find the failing image
-oc describe pod -l serving.kserve.io/inferenceservice=<model> -n <ns> | grep "Failed to pull image"
-```
-
-**Two different situations — different responses:**
-
-**1. Subscription-gated image** (`quay.io/rhoai/`, `registry.redhat.io/rh*`):
-Not terminal — fixable. These are RHOAI-subscription images. The standard fix is to use
-the public CPU runtime image instead: `quay.io/rh-aiservices-bu/vllm-cpu-openai-ubi9:0.3`
-
-```bash
-# Delete the runtime that uses the subscription image
-oc delete servingruntime <runtime-name> -n <ns>
-oc delete inferenceservice <model> -n <ns>
-# Recreate ServingRuntime with the public image, then redeploy the InferenceService
-```
-
-**2. Public registry image with wrong URI** (`quay.io/rh-aiservices-bu/`, `quay.io/redhat-ai-services/`):
-Truly terminal if the URI is wrong — retrying won't help.
-Verify the image reference and fix the URI.
-
-### CrashLoopBackOff / OOMKilled — check logs, attempt one standard fix
-
-These conditions mean the container started but is crashing. Unlike Unschedulable/ImagePullBackOff,
-these are often fixable. **Pull the logs, read them, apply at most one clear standard fix.**
-
-```bash
-# Get logs (try both container names used by KServe)
-oc logs -l serving.kserve.io/inferenceservice=<model> -n <ns> --tail=60
-oc logs -l serving.kserve.io/inferenceservice=<model> -n <ns> -c kserve-container --tail=60
-```
-
-**Common fixable log errors and their standard fixes:**
-
-| Log shows | Root cause | Standard fix |
+| Condition | Detection | Action |
 |---|---|---|
-| `max_model_len` exceeds model's max | --max-model-len too high | Reduce to model's actual max (e.g. qwen2.5-0.5b max is 2048) |
-| `killed` / `OOMKilled` in events | Not enough memory for the model | Reduce `--max-model-len` further or use a smaller model |
-| `RuntimeError: bfloat16 is not supported` | Wrong dtype for GPU type | Change `--dtype=half` → `--dtype=bfloat16`, or remove `--dtype` |
-| `no module named vllm` / import error | Wrong container image | Check runtime image — likely wrong ServingRuntime |
-| `CUDA out of memory` | GPU VRAM too small | Reduce `--gpu-memory-utilization` to 0.85, or reduce `--max-model-len` |
+| **Unschedulable** | `pod.status.conditions[reason=Unschedulable].message` | Diagnose node resources. No GPU → CPU runtime + small model. No CPU/memory → smaller model. |
+| **ImagePullBackOff** | `containerStatuses[].state.waiting.reason` | Check which image failed (`oc describe pod \| grep "Failed to pull"`). Subscription image → use a public alternative. Wrong URI → fix it. |
+| **CrashLoopBackOff / OOMKilled** | `containerStatuses[].state.waiting.reason` or `lastState.terminated.reason` | Pull logs and diagnose. One root cause → one standard fix. |
 
-**When applying a fix to an InferenceService:** re-apply the full manifest (not `oc patch` with index-based args) to avoid fragile index arithmetic. Delete and recreate is cleaner.
-
-**Principle:** one root cause → one standard fix. If the log is unclear → show it and stop.
-
-**Never:** patch around the error with env hacks, skip validation, or modify operator-owned resources.
-
-### Polling — always track the NEWEST pod
-
-When multiple pods exist (during a rolling update after a patch), **always sort by creation time and track the newest one**. Old terminating/crashing pods are irrelevant.
+### Log diagnosis — always use `kserve-container`, not `modelcar`
 
 ```bash
-# WRONG — head -1 may return an old pod from a previous rollout
-POD_NAME=$(oc get pods -l serving.kserve.io/inferenceservice=<model> -n <ns> --no-headers | head -1 | awk '{print $1}')
-
-# CORRECT — sort by age, newest last
-POD_NAME=$(oc get pods -l serving.kserve.io/inferenceservice=<model> -n <ns> \
-  --no-headers --sort-by=.metadata.creationTimestamp 2>/dev/null | tail -1 | awk '{print $1}')
-
-# Skip if the pod is being terminated (old rollout pod)
-IS_TERMINATING=$(oc get pod "$POD_NAME" -n <ns> \
-  -o jsonpath='{.metadata.deletionTimestamp}' 2>/dev/null)
-[ -n "$IS_TERMINATING" ] && continue  # wait for new pod to appear
+oc logs <pod> -n <ns> -c kserve-container --tail=40
 ```
 
-### `1/2 Running` + readiness probe failed — normal during model loading
+`modelcar` is a silent OCI file server (always 0 lines — that is correct).
+`kserve-container` is the actual model server where errors and loading output appear.
 
-The most common `1/2 Running` state is **not an error**. It is the expected lifecycle
-of any ML serving container: start → load weights into memory → begin serving → ready.
+| Log / symptom | Fix |
+|---|---|
+| `max_model_len` exceeds model max | Reduce `--max-model-len` (e.g. qwen2.5-0.5b max is 2048) |
+| OOMKilled | Reduce `--max-model-len` or use a smaller model |
+| Server started on `:8000`, pod stays `1/2 Running` | Add `--port=8080` to ServingRuntime args (KServe probes 8080) |
+| Wrong model loaded (e.g. facebook/opt-125m) | Add `--model=/mnt/models` to args (reads from KServe's model mount) |
+| dtype error | Change `--dtype` or remove it |
 
-The readiness probe fires against the serving port (e.g. 8080) the whole time.
-While weights are loading it gets `connection refused` because the HTTP server
-hasn't started yet. This is normal. Once loading completes, the server starts,
-the readiness probe passes, and the pod goes to `2/2 Running`.
+Apply **one fix at a time**. Delete + recreate is cleaner than patching arg indices.
+If the log is unclear → show it and stop.
 
-**The only thing that matters during this wait: is the container still Running?**
+### `1/2 Running` is normal during model loading
+
+`1/2 Running` + readiness probe `connection refused` = server is still loading weights.
+This is expected. The probe passes once the model is loaded and the server starts serving.
+Container state `running` → keep waiting. Container state `CrashLoopBackOff`/`OOMKilled` → act.
+
 ```bash
-# Generic: check container states (not readiness)
-oc get pod <pod> -n <ns> \
-  -o jsonpath='{range .status.containerStatuses[*]}{.name}: {.state}{"\n"}{end}'
-```
-
-- Container state `running` + readiness failing → **still loading, keep waiting**
-- Container state `waiting: CrashLoopBackOff` → crashed, check logs
-- Container state `terminated: OOMKilled` → out of memory, reduce resources
-
-**Read events to understand what's happening (generic diagnostic):**
-```bash
-oc get events -n <ns> \
-  --field-selector involvedObject.name=<pod-name> \
-  --sort-by='.lastTimestamp' | tail -10
-```
-
-Event says `Readiness probe failed: connection refused` → server loading, normal.
-Event says `Readiness probe failed: HTTP 500` → server started but erroring, check logs.
-Event says `OOMKilled` or `BackOff` → real failure, investigate.
-
-**Container roles in a KServe predictor pod — know which one to check:**
-
-| Container name | Role | Expected logs |
-|---|---|---|
-| `kserve-container` | The actual model server (vLLM, OVMS, etc.) | Loading progress, errors → **check this for diagnostics** |
-| `modelcar` | OCI model file server — serves model files from the image at `/mnt/models` | **Always 0 lines — silent by design, this is normal** |
-| `kube-rbac-proxy` / other proxies | Auth/network proxy injected by OpenShift | Minimal logs unless misconfigured |
-
-**Always check `kserve-container` for model loading status:**
-```bash
-# CORRECT — gets actual model server logs
-oc logs <pod> -n <ns> -c kserve-container --tail=60
-
-# WRONG — may return modelcar (0 lines), which tells you nothing
-oc logs <pod> -n <ns> --tail=60
-```
-
-If `kserve-container` logs show active loading output (weight loading progress, device initialization) → the model is loading, keep waiting.  
-If `kserve-container` logs are empty after 5+ minutes → the container may be waiting for model files from `modelcar` or has a silent startup issue. Check: `oc describe pod <pod> -n <ns> | grep -A 5 Events`.
-
-**CPU model load times (rough estimates):** qwen2.5-0.5b ≈ 5-10 min, llama-3.2-1b ≈ 15 min, granite-3.3-2b ≈ 25-30 min. If `kserve-container` shows active output within these windows — it is working normally.
-
-**If `kserve-container` logs show `Application startup complete` but the pod stays `1/2 Running`:**
-The server is up but the readiness probe can't reach it — almost always a port mismatch.
-```bash
-# Check what port vLLM is actually serving on:
-oc logs <pod> -n <ns> -c kserve-container | grep "Starting vLLM API server"
-# e.g. "on http://0.0.0.0:8000" → vLLM is on 8000, KServe probes 8080 → mismatch
-
-# Fix: ServingRuntime must declare port 8080 AND pass --port=8080 to vLLM
-# Also: --model=/mnt/models ensures vLLM reads the modelcar-provided model files,
-# not its own default (you may see facebook/opt-125m if this arg is missing)
+# Check events for what the probe is actually seeing
+oc get events -n <ns> --field-selector involvedObject.name=<pod> \
+  --sort-by='.lastTimestamp' | tail -5
 ```
 
 ---

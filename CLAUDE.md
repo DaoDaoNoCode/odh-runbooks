@@ -593,15 +593,27 @@ Event says `Readiness probe failed: connection refused` → server loading, norm
 Event says `Readiness probe failed: HTTP 500` → server started but erroring, check logs.
 Event says `OOMKilled` or `BackOff` → real failure, investigate.
 
-**When `1/2 Running` persists longer than expected**, check which container is the stuck one:
+**Container roles in a KServe predictor pod — know which one to check:**
+
+| Container name | Role | Expected logs |
+|---|---|---|
+| `kserve-container` | The actual model server (vLLM, OVMS, etc.) | Loading progress, errors → **check this for diagnostics** |
+| `modelcar` | OCI model file server — serves model files from the image at `/mnt/models` | **Always 0 lines — silent by design, this is normal** |
+| `kube-rbac-proxy` / other proxies | Auth/network proxy injected by OpenShift | Minimal logs unless misconfigured |
+
+**Always check `kserve-container` for model loading status:**
 ```bash
-oc get pod <pod> -n <ns> \
-  -o jsonpath='{.status.containerStatuses[*].name} {.status.containerStatuses[*].ready}'
-# If a proxy/sidecar (not the model container) is the unready one, check its logs:
-oc logs <pod> -n <ns> -c <sidecar-container-name> --tail=20
+# CORRECT — gets actual model server logs
+oc logs <pod> -n <ns> -c kserve-container --tail=60
+
+# WRONG — may return modelcar (0 lines), which tells you nothing
+oc logs <pod> -n <ns> --tail=60
 ```
 
-**CPU model load times (rough estimates):** qwen2.5-0.5b ≈ 3-5 min, llama-3.2-1b ≈ 10 min, granite-3.3-2b ≈ 20 min. If the pod is still `1/2 Running` with `connection refused` within these windows — it is working normally.
+If `kserve-container` logs show active loading output (weight loading progress, device initialization) → the model is loading, keep waiting.  
+If `kserve-container` logs are empty after 5+ minutes → the container may be waiting for model files from `modelcar` or has a silent startup issue. Check: `oc describe pod <pod> -n <ns> | grep -A 5 Events`.
+
+**CPU model load times (rough estimates):** qwen2.5-0.5b ≈ 5-10 min, llama-3.2-1b ≈ 15 min, granite-3.3-2b ≈ 25-30 min. If `kserve-container` shows active output within these windows — it is working normally.
 
 ---
 

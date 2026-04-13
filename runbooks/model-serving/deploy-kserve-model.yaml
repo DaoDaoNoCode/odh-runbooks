@@ -275,10 +275,12 @@ steps:
         if [ -n "$CRASH" ] || [ -n "$OOM" ]; then
           echo "POD CRASHING: CrashLoopBackOff=${CRASH} OOMKilled=${OOM}"
           echo ""
-          echo "=== Container logs (last 60 lines) ==="
-          oc logs "$POD_NAME" -n {{ project_namespace }} --tail=60 2>/dev/null || \
-            oc logs "$POD_NAME" -n {{ project_namespace }} -c kserve-container --tail=60 2>/dev/null || \
-            echo "(no logs yet)"
+          echo "=== kserve-container logs (last 60 lines) ==="
+          # Always check kserve-container specifically — it is the actual model server.
+          # The modelcar container (OCI file server) is always silent by design.
+          oc logs "$POD_NAME" -n {{ project_namespace }} -c kserve-container --tail=60 2>/dev/null || \
+            oc logs "$POD_NAME" -n {{ project_namespace }} --tail=60 2>/dev/null || \
+            echo "(no logs yet — container may still be initializing)"
           echo ""
           echo "pod-crashing"
           exit 0

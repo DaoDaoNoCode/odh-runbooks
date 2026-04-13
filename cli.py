@@ -348,7 +348,8 @@ def wizard(runbook_name: str, param: tuple[str, ...]):
 
     console.print("\n[bold]Parameters collected:[/bold]")
     for k, v in params.items():
-        console.print(f"  {k} = {v}")
+        if v is not None and str(v).strip() != "":
+            console.print(f"  {k} = {v}")
 
     console.print()
     if click.confirm("Preview plan before executing?", default=True):

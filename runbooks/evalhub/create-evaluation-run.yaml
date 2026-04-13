@@ -808,21 +808,30 @@ steps:
       timeout: "10s"
       on_fail: STOP
     return: |
-      ✓ EvalHub evaluation run complete.
+      ✓ EvalHub evaluation job submitted.
 
       Namespace:  {{ project_namespace }}
       Model:      {{ model_name }} ({{ model_catalog_tag }})
-        Source:   {{ model_resolution | replace('DEPLOY:', 'OCI catalog: ') | replace('EXISTING:', 'existing: ') }}
         URL:      {{ model_url }}
-      Benchmark:  arc_easy via {{ benchmark_provider }}
+      Benchmark:  {{ benchmark_id }} via {{ benchmark_provider }}
+      Job ID:     {{ eval_job.resource.id }}
 
-      ── View results ────────────────────────────────────────────
+      ── View results (check back when complete) ──────────────────
       https://{{ dashboard_host }}/evaluation/{{ project_namespace }}
 
-      Re-run with different options:
-        Smaller model (faster): -p model_catalog_tag=llama-3.2-1b-instruct
-        Safety eval:            -p benchmark_provider=garak
-        Your own model:         -p deployed_model_url=<your-endpoint>
+      Evaluation runs are async — the dashboard row becomes clickable
+      when state=completed. Benchmark duration depends on provider and
+      cluster resources (arc_easy on CPU takes several hours).
+
+      To check status:
+        TOKEN=$(oc whoami -t)
+        curl -sk "https://{{ evalhub_host }}/api/v1/evaluations/jobs/{{ eval_job.resource.id }}" \
+          -H "X-Tenant: {{ project_namespace }}" \
+          -H "Authorization: Bearer $TOKEN" | python3 -m json.tool | grep state
+
+      MLflow embedded view: appears in the results page when the EvalHub
+      operator is configured to log runs to MLflow with workspace scoping.
+      If the view is empty, the operator's MLflow integration may need configuration.
 
 known_bad_patterns:
   - "never set model_uri (S3 path) — the default OCI catalog path needs no S3"

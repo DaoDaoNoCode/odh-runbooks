@@ -30,6 +30,34 @@ parameters:
     required: true
     discover_cmd: "oc get namespace -l opendatahub.io/dashboard=true --no-headers -o jsonpath='{.items[*].metadata.name}'"
     example: "my-data-science-project"
+  - name: learning_rate
+    description: Learning rate hyperparameter
+    required: false
+    default: "0.001"
+  - name: batch_size
+    description: Batch size hyperparameter
+    required: false
+    default: "32"
+  - name: epochs
+    description: Number of training epochs
+    required: false
+    default: "10"
+  - name: train_loss_start
+    description: Starting training loss (decreases over epochs)
+    required: false
+    default: "0.820"
+  - name: train_acc_start
+    description: Starting training accuracy (increases over epochs)
+    required: false
+    default: "0.720"
+  - name: val_loss_start
+    description: Starting validation loss
+    required: false
+    default: "0.890"
+  - name: val_acc_start
+    description: Starting validation accuracy
+    required: false
+    default: "0.680"
 
 steps:
   - id: verify-mlflow-reachable
@@ -101,42 +129,64 @@ steps:
       timeout: "10s"
       on_fail: STOP
 
-  - id: log-params-batch
+  - id: log-params-and-metrics
     confidence: doc-derived
-    description: Log training hyperparameters and metrics in one batch call
+    description: >
+      Log hyperparameters once, then log metrics across multiple steps so the
+      dashboard renders a proper learning curve chart.
+      Timestamps must be in milliseconds (epoch * 1000) — timestamp=0 causes
+      metrics to not appear in chart views.
     action:
-      type: api_call
-      method: POST
-      url: "{{ mlflow_tracking_uri }}/api/2.0/mlflow/runs/log-batch"
-      headers:
-        Content-Type: "application/json"
-        Authorization: "Bearer {{ oc_token }}"
-        X-MLFLOW-WORKSPACE: "{{ project_namespace }}"
-      body: |
-        {
-          "run_id": "{{ run.info.run_id }}",
-          "params": [
-            {"key": "learning_rate", "value": "0.001"},
-            {"key": "batch_size", "value": "32"},
-            {"key": "epochs", "value": "10"},
-            {"key": "optimizer", "value": "adam"},
-            {"key": "model_type", "value": "resnet50"}
-          ],
-          "metrics": [
-            {"key": "train_loss", "value": 0.42, "timestamp": 0, "step": 0},
-            {"key": "train_accuracy", "value": 0.87, "timestamp": 0, "step": 0},
-            {"key": "val_loss", "value": 0.51, "timestamp": 0, "step": 0},
-            {"key": "val_accuracy", "value": 0.83, "timestamp": 0, "step": 0}
-          ],
-          "tags": [
-            {"key": "environment", "value": "{{ project_namespace }}"},
-            {"key": "framework", "value": "pytorch"}
-          ]
-        }
+      type: query
+      command: |
+        RUN_ID="{{ run.info.run_id }}"
+        URI="{{ mlflow_tracking_uri }}"
+        TOKEN="{{ oc_token }}"
+        NS="{{ project_namespace }}"
+
+        # Log hyperparameters (once, no timestamp/step needed)
+        curl -sk -X POST "${URI}/api/2.0/mlflow/runs/log-batch" \
+          -H "Authorization: Bearer ${TOKEN}" \
+          -H "X-MLFLOW-WORKSPACE: ${NS}" \
+          -H "Content-Type: application/json" \
+          -d "{\"run_id\":\"${RUN_ID}\",
+               \"params\":[
+                 {\"key\":\"learning_rate\",\"value\":\"{{ learning_rate }}\"},
+                 {\"key\":\"batch_size\",\"value\":\"{{ batch_size }}\"},
+                 {\"key\":\"epochs\",\"value\":\"{{ epochs }}\"},
+                 {\"key\":\"optimizer\",\"value\":\"adam\"},
+                 {\"key\":\"model_type\",\"value\":\"resnet50\"}
+               ],
+               \"tags\":[
+                 {\"key\":\"environment\",\"value\":\"${NS}\"},
+                 {\"key\":\"framework\",\"value\":\"pytorch\"}
+               ]}" 2>/dev/null
+        echo "params logged"
+
+        # Log metrics per epoch — proper timestamps and steps for chart rendering
+        for STEP in 1 2 3 4 5 6 7 8 9 10; do
+          TS=$(date +%s000)
+          LOSS=$(python3 -c "print(round({{ train_loss_start }} - ($STEP-1)*0.04, 4))")
+          ACC=$(python3 -c "print(round({{ train_acc_start }} + ($STEP-1)*0.015, 4))")
+          VL=$(python3 -c "print(round({{ val_loss_start }} - ($STEP-1)*0.03, 4))")
+          VA=$(python3 -c "print(round({{ val_acc_start }} + ($STEP-1)*0.012, 4))")
+          curl -sk -X POST "${URI}/api/2.0/mlflow/runs/log-batch" \
+            -H "Authorization: Bearer ${TOKEN}" \
+            -H "X-MLFLOW-WORKSPACE: ${NS}" \
+            -H "Content-Type: application/json" \
+            -d "{\"run_id\":\"${RUN_ID}\",\"metrics\":[
+              {\"key\":\"train_loss\",\"value\":${LOSS},\"timestamp\":${TS},\"step\":${STEP}},
+              {\"key\":\"train_accuracy\",\"value\":${ACC},\"timestamp\":${TS},\"step\":${STEP}},
+              {\"key\":\"val_loss\",\"value\":${VL},\"timestamp\":${TS},\"step\":${STEP}},
+              {\"key\":\"val_accuracy\",\"value\":${VA},\"timestamp\":${TS},\"step\":${STEP}}
+            ]}" 2>/dev/null
+          sleep 0.1
+        done
+        echo "metrics logged (10 steps)"
     post_check:
       command: "echo ok"
       expected: "ok"
-      timeout: "10s"
+      timeout: "30s"
       on_fail: STOP
 
   - id: finalize-run

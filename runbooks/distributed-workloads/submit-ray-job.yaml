@@ -229,7 +229,24 @@ steps:
       Workers:    {{ num_workers }}x {{ cpu_per_worker }} CPU / {{ memory_per_worker }}
       Entrypoint: {{ entrypoint }}
 
-      Dashboard: https://<odh-dashboard>/observe-monitor/workload-metrics/workload-status/{{ project_namespace }}
+      Dashboard: https://{{ dashboard_host }}/observe-monitor/workload-metrics/workload-status/{{ project_namespace }}
+
+  - id: get-dashboard-host
+    confidence: doc-derived
+    description: Get the ODH dashboard host for the return URL
+    action:
+      type: query
+      command: |
+        oc get route rhods-dashboard -n redhat-ods-applications \
+          -o jsonpath='{.spec.host}' 2>/dev/null || \
+        oc get route rhods-dashboard -n opendatahub \
+          -o jsonpath='{.spec.host}' 2>/dev/null
+      store_as: dashboard_host
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
 
 source_repos:
   - "https://github.com/project-codeflare/codeflare-operator"

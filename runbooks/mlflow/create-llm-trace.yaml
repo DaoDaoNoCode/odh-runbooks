@@ -60,33 +60,54 @@ steps:
 
   - id: create-trace
     confidence: doc-derived
-    description: Create a trace for an LLM inference request
+    description: >
+      Create a trace for an LLM inference request.
+      Two-step: POST creates the trace in IN_PROGRESS state (status field is ignored by server),
+      then PATCH /api/2.0/mlflow/traces/{request_id} finalizes it with status + execution_time_ms.
+      PUT and sub-resource /spans endpoints return 404 on this gateway — use PATCH to finalize.
+      List traces via GET ajax-api/2.0/mlflow/traces?experiment_ids=<id> (not api/2.0/).
+      timestamp_ms=0 causes negative execution_time display — use current epoch ms instead.
     action:
-      type: api_call
-      method: POST
-      url: "{{ mlflow_tracking_uri }}/api/2.0/mlflow/traces"
-      headers:
-        Content-Type: "application/json"
-        Authorization: "Bearer {{ oc_token }}"
-        X-MLFLOW-WORKSPACE: "{{ project_namespace }}"
-      body: |
-        {
-          "experiment_id": "{{ experiment.experiment_id }}",
-          "timestamp_ms": 0,
-          "execution_time_ms": 1250,
-          "status": "OK",
-          "request_metadata": [
-            {"key": "mlflow.traceInputs", "value": "{\"messages\": [{\"role\": \"user\", \"content\": \"What is MLflow?\"}]}"},
-            {"key": "mlflow.traceOutputs", "value": "{\"choices\": [{\"message\": {\"role\": \"assistant\", \"content\": \"MLflow is an open source platform...\"}}]}"},
-            {"key": "mlflow.trace.name", "value": "chat_completion"}
-          ],
-          "tags": [
-            {"key": "model.name", "value": "llama3-8b"},
-            {"key": "token.usage.total", "value": "145"},
-            {"key": "token.usage.prompt", "value": "12"},
-            {"key": "token.usage.completion", "value": "133"}
-          ]
-        }
+      type: query
+      command: |
+        TOKEN="{{ oc_token }}"
+        URI="{{ mlflow_tracking_uri }}"
+        NS="{{ project_namespace }}"
+        EXP_ID="{{ experiment.experiment_id }}"
+        TS=$(python3 -c "import time; print(int(time.time()*1000))")
+
+        # Step 1: Create trace (server ignores status/execution_time_ms here — always IN_PROGRESS)
+        TRACE_RESP=$(/usr/bin/curl -sk -X POST "${URI}/api/2.0/mlflow/traces" \
+          -H "Authorization: Bearer ${TOKEN}" \
+          -H "X-MLFLOW-WORKSPACE: ${NS}" \
+          -H "Content-Type: application/json" \
+          -d "{
+            \"experiment_id\": \"${EXP_ID}\",
+            \"timestamp_ms\": ${TS},
+            \"execution_time_ms\": 1250,
+            \"status\": \"IN_PROGRESS\",
+            \"request_metadata\": [
+              {\"key\": \"mlflow.traceInputs\", \"value\": \"{\\\"messages\\\": [{\\\"role\\\": \\\"user\\\", \\\"content\\\": \\\"What is MLflow?\\\"}]}\"},
+              {\"key\": \"mlflow.traceOutputs\", \"value\": \"{\\\"choices\\\": [{\\\"message\\\": {\\\"role\\\": \\\"assistant\\\", \\\"content\\\": \\\"MLflow is an open source platform...\\\"}}]}\"},
+              {\"key\": \"mlflow.trace.name\", \"value\": \"chat_completion\"}
+            ],
+            \"tags\": [
+              {\"key\": \"model.name\", \"value\": \"llama3-8b\"},
+              {\"key\": \"token.usage.total\", \"value\": \"145\"},
+              {\"key\": \"token.usage.prompt\", \"value\": \"12\"},
+              {\"key\": \"token.usage.completion\", \"value\": \"133\"}
+            ]
+          }")
+        TRACE_ID=$(echo "$TRACE_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['trace_info']['request_id'])")
+        echo "Trace created: $TRACE_ID"
+
+        # Step 2: Finalize with PATCH (not PUT — PUT returns 404 on this gateway)
+        /usr/bin/curl -sk -X PATCH "${URI}/api/2.0/mlflow/traces/${TRACE_ID}" \
+          -H "Authorization: Bearer ${TOKEN}" \
+          -H "X-MLFLOW-WORKSPACE: ${NS}" \
+          -H "Content-Type: application/json" \
+          -d '{"status": "OK", "execution_time_ms": 1250}'
+        echo "Trace finalized."
       store_response_as: trace
     post_check:
       assert: trace is not empty

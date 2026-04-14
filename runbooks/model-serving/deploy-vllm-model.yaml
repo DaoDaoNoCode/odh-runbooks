@@ -414,10 +414,27 @@ steps:
           -H "Content-Type: application/json" \
           -d '{"model": "{{ model_name }}", "messages": [{"role": "user", "content": "Hello!"}]}'
 
-      Dashboard: https://<odh-dashboard>/ai-hub/deployments/{{ project_namespace }}
+      Dashboard: https://{{ dashboard_host }}/ai-hub/deployments/{{ project_namespace }}
 
       NOTE for CPU deployments: ~3 tokens/s — very slow, not for production.
       For LlamaStack integration, use this endpoint as the VLLM_URL.
+
+  - id: get-dashboard-host
+    confidence: doc-derived
+    description: Get the ODH dashboard host for the return URL
+    action:
+      type: query
+      command: |
+        oc get route rhods-dashboard -n redhat-ods-applications \
+          -o jsonpath='{.spec.host}' 2>/dev/null || \
+        oc get route rhods-dashboard -n opendatahub \
+          -o jsonpath='{.spec.host}' 2>/dev/null
+      store_as: dashboard_host
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
 
 source_repos:
   - "https://github.com/kserve/kserve"

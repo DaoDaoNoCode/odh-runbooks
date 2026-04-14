@@ -227,8 +227,25 @@ steps:
       S3 connection: {{ s3_connection_name }} (env vars injected, optional=true)
 
       Open:  https://{{ workbench_host }}/notebook/{{ project_namespace }}/{{ workbench_name }}
-      Dashboard: https://<odh-dashboard>/projects/{{ project_namespace }}
+      Dashboard: https://{{ dashboard_host }}/projects/{{ project_namespace }}
                → Workbenches tab → {{ workbench_name }} → Open
+
+  - id: get-dashboard-host
+    confidence: doc-derived
+    description: Get the ODH dashboard host for the return URL
+    action:
+      type: query
+      command: |
+        oc get route rhods-dashboard -n redhat-ods-applications \
+          -o jsonpath='{.spec.host}' 2>/dev/null || \
+        oc get route rhods-dashboard -n opendatahub \
+          -o jsonpath='{.spec.host}' 2>/dev/null
+      store_as: dashboard_host
+    post_check:
+      command: "echo ok"
+      expected: "ok"
+      timeout: "10s"
+      on_fail: STOP
 
 source_repos:
   - "https://github.com/opendatahub-io/notebooks"

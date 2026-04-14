@@ -525,6 +525,15 @@ oc get route rhods-dashboard -n opendatahub -o jsonpath='{.spec.host}' 2>/dev/nu
 
 **RHOAI operator namespace:** `redhat-ods-applications` (RHOAI) or `opendatahub` (ODH)
 
+**MLflow workspace API header** — the correct header is `X-MLFLOW-WORKSPACE: <namespace>` (NOT X-Workspace):
+```bash
+TOKEN=$(oc whoami -t)
+MLFLOW_URI="https://data-science-gateway.apps.../mlflow"
+# Every MLflow API call needs both headers:
+curl -sk -X POST "${MLFLOW_URI}/api/2.0/mlflow/experiments/create"   -H "Authorization: Bearer $TOKEN"   -H "X-MLFLOW-WORKSPACE: <project-namespace>"   -H "Content-Type: application/json"   -d '{"name": "my-experiment"}'
+```
+The gateway URL is: `data-science-gateway.apps.<cluster>/mlflow` (from `oc get httproute mlflow -n redhat-ods-applications`)
+
 **DataScienceCluster patch pattern** (enabling components):
 ```bash
 oc patch $(oc get dsc -o name | head -1) --type merge \

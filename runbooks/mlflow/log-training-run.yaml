@@ -56,6 +56,8 @@ steps:
       url: "{{ mlflow_tracking_uri }}/api/2.0/mlflow/experiments/create"
       headers:
         Content-Type: "application/json"
+        Authorization: "Bearer {{ oc_token }}"
+        X-MLFLOW-WORKSPACE: "{{ project_namespace }}"
       body: |
         {
           "name": "{{ experiment_name }}",
@@ -80,6 +82,8 @@ steps:
       url: "{{ mlflow_tracking_uri }}/api/2.0/mlflow/runs/create"
       headers:
         Content-Type: "application/json"
+        Authorization: "Bearer {{ oc_token }}"
+        X-MLFLOW-WORKSPACE: "{{ project_namespace }}"
       body: |
         {
           "experiment_id": "{{ experiment.experiment_id }}",
@@ -106,6 +110,8 @@ steps:
       url: "{{ mlflow_tracking_uri }}/api/2.0/mlflow/runs/log-batch"
       headers:
         Content-Type: "application/json"
+        Authorization: "Bearer {{ oc_token }}"
+        X-MLFLOW-WORKSPACE: "{{ project_namespace }}"
       body: |
         {
           "run_id": "{{ run.info.run_id }}",
@@ -142,6 +148,8 @@ steps:
       url: "{{ mlflow_tracking_uri }}/api/2.0/mlflow/runs/update"
       headers:
         Content-Type: "application/json"
+        Authorization: "Bearer {{ oc_token }}"
+        X-MLFLOW-WORKSPACE: "{{ project_namespace }}"
       body: |
         {
           "run_id": "{{ run.info.run_id }}",

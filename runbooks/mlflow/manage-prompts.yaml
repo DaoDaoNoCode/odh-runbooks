@@ -29,6 +29,8 @@ steps:
       url: "{{ mlflow_tracking_uri }}/api/2.0/mlflow/prompts/create-prompt"
       headers:
         Content-Type: "application/json"
+        Authorization: "Bearer {{ oc_token }}"
+        X-MLFLOW-WORKSPACE: "{{ project_namespace }}"
       body: |
         {
           "name": "{{ prompt_name }}",
@@ -56,6 +58,8 @@ steps:
       url: "{{ mlflow_tracking_uri }}/api/2.0/mlflow/prompts/set-prompt-alias"
       headers:
         Content-Type: "application/json"
+        Authorization: "Bearer {{ oc_token }}"
+        X-MLFLOW-WORKSPACE: "{{ project_namespace }}"
       body: |
         {
           "name": "{{ prompt_name }}",
@@ -77,6 +81,8 @@ steps:
       url: "{{ mlflow_tracking_uri }}/api/2.0/mlflow/prompts/update-prompt"
       headers:
         Content-Type: "application/json"
+        Authorization: "Bearer {{ oc_token }}"
+        X-MLFLOW-WORKSPACE: "{{ project_namespace }}"
       body: |
         {
           "name": "{{ prompt_name }}",

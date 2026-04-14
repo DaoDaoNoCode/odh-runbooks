@@ -36,6 +36,8 @@ steps:
       url: "{{ mlflow_tracking_uri }}/api/2.0/mlflow/registered-models/create"
       headers:
         Content-Type: "application/json"
+        Authorization: "Bearer {{ oc_token }}"
+        X-MLFLOW-WORKSPACE: "{{ project_namespace }}"
       body: |
         {
           "name": "{{ model_name }}",
@@ -60,6 +62,8 @@ steps:
       url: "{{ mlflow_tracking_uri }}/api/2.0/mlflow/model-versions/create"
       headers:
         Content-Type: "application/json"
+        Authorization: "Bearer {{ oc_token }}"
+        X-MLFLOW-WORKSPACE: "{{ project_namespace }}"
       body: |
         {
           "name": "{{ model_name }}",
@@ -103,6 +107,8 @@ steps:
       url: "{{ mlflow_tracking_uri }}/api/2.0/mlflow/model-versions/transition-stage"
       headers:
         Content-Type: "application/json"
+        Authorization: "Bearer {{ oc_token }}"
+        X-MLFLOW-WORKSPACE: "{{ project_namespace }}"
       body: |
         {
           "name": "{{ model_name }}",

@@ -28,6 +28,8 @@ steps:
       url: "{{ mlflow_tracking_uri }}/api/2.0/mlflow/experiments/get-by-name"
       headers:
         Content-Type: "application/json"
+        Authorization: "Bearer {{ oc_token }}"
+        X-MLFLOW-WORKSPACE: "{{ project_namespace }}"
       body: |
         {"experiment_name": "{{ experiment_name }}"}
       store_response_as: experiment
@@ -47,6 +49,8 @@ steps:
       url: "{{ mlflow_tracking_uri }}/api/2.0/mlflow/runs/search"
       headers:
         Content-Type: "application/json"
+        Authorization: "Bearer {{ oc_token }}"
+        X-MLFLOW-WORKSPACE: "{{ project_namespace }}"
       body: |
         {
           "experiment_ids": ["{{ experiment.experiment.experiment_id }}"],

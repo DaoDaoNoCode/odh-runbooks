@@ -25,6 +25,8 @@ steps:
       url: "{{ mlflow_tracking_uri }}/api/2.0/mlflow/version"
       headers:
         Content-Type: "application/json"
+        Authorization: "Bearer {{ oc_token }}"
+        X-MLFLOW-WORKSPACE: "{{ project_namespace }}"
       store_response_as: mlflow_version
     post_check:
       assert: mlflow_version is not empty
@@ -42,6 +44,8 @@ steps:
       url: "{{ mlflow_tracking_uri }}/api/2.0/mlflow/experiments/create"
       headers:
         Content-Type: "application/json"
+        Authorization: "Bearer {{ oc_token }}"
+        X-MLFLOW-WORKSPACE: "{{ project_namespace }}"
       body: |
         {
           "name": "{{ experiment_name }}",
@@ -63,6 +67,8 @@ steps:
       url: "{{ mlflow_tracking_uri }}/api/2.0/mlflow/traces"
       headers:
         Content-Type: "application/json"
+        Authorization: "Bearer {{ oc_token }}"
+        X-MLFLOW-WORKSPACE: "{{ project_namespace }}"
       body: |
         {
           "experiment_id": "{{ experiment.experiment_id }}",

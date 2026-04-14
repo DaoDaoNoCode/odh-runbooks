@@ -842,9 +842,13 @@ known_bad_patterns:
   - "never set model_uri (S3 path) — the default OCI catalog path needs no S3"
   - "never create the EvalHub Route manually — auto-created by odh-model-controller"
   - "if model fails to load with OOM: use llama-3.2-1b-instruct (2.5GB) instead of default"
-  - "never use lighteval/garak/guidellm expecting the MLflow embedded view — only lm_evaluation_harness logs mlflow_run_id"
+  - "never use lighteval/garak/guidellm expecting the MLflow embedded view — only lm_evaluation_harness logs mlflow_run_id to the runner pod's MLFLOW_TRACKING_URI"
   - "never create EvalHub CRs in user namespaces — EvalHub is a shared cluster service in the ODH namespace"
   - "never wait for evaluation completion in a runbook — evaluations are async, use the dashboard URL"
+  - "never expect fast evaluations on CPU clusters — GPU provides 10-50x faster inference; on CPU even small benchmarks (500 samples) take 20+ minutes"
+  - "never run garak on CPU-only clusters — the 600s timeout is too short for slow inference"
+  - "never run guidellm without checking internet access — it downloads gpt2 tokenizer from HuggingFace"
+  - "always check cluster resources before choosing a benchmark — check GPU availability and current runner pod count"
 
 rollback_order:
   - "oc delete evalhub {{ evalhub_instance_name }} -n {{ project_namespace }} 2>/dev/null || true"
